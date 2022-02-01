@@ -1,0 +1,13 @@
+name = "ModulatedCurves"
+uuid = "fe8c8720-b329-4da7-9136-aa4067905fef"
+authors = ["Gaspard Jankowiak <gaspard@math.janko.fr>"]
+version = "0.1.0"
+
+[deps]
+EvenParam = "bcb3e14e-248c-11e9-14d9-6db38a995404"
+GLMakie = "e9467ef8-e4e7-5192-8a1a-b1aee30e663a"
+Interpolations = "a98d9a8b-a2ab-59e6-89dd-64a1c18fca59"
+JankoUtils = "c162ff04-248c-11e9-37d4-2fd351b76fad"
+LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
+Printf = "de0858da-6303-5e67-8744-51eddeeeb8d7"
+SparseArrays = "2f01184e-e22b-5df5-ae63-d93ebab69eaf"
