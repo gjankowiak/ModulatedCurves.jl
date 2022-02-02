@@ -505,6 +505,45 @@ function initial_data_smooth(P::Params; sides::Int=1, smoothing::Float64, revers
     return [P.M/P.L*ones(P.N); thetas; 0; 0; 0]
 end
 
+function initial_data_polar(P::Params; r::Function)
+    N = P.N
+
+    # oversample the curve
+    φs = collect(range(0, 2π, length=10N + 1))[1:10N]
+
+    x = [r(φ)*cos(φ) for φ in φs]
+    y = [r(φ)*sin(φ) for φ in φs]
+    xy = [x y]
+
+    # resample to get evenly spaced nodes
+    xy_even = EvenParam.reparam(xy; closed=true, new_N = N)
+
+    # Recenter
+    xy_even = xy_even .- [xy_even[1,1] xy_even[1,2]]
+
+    # Rotate so that the first segment is parallel to the x axis
+    xy_even_c = xy_even[:,1] + xy_even[:,2]*im
+    alpha = angle(xy_even_c[2])
+    xy_even_c = xy_even_c.*exp.(-im*alpha)
+
+    # Compute tangential angles
+    xy_even = [real.(xy_even_c) imag.(xy_even_c)]
+    xy_diff = circshift(xy_even, -1) - xy_even
+    xy_angles = angle.(xy_diff[:,1]+xy_diff[:,2]*im)
+
+    thetas = zeros(N)
+    thetas[1] = xy_angles[1]
+    for i in 2:N
+        thetas[i] = thetas[i-1] + rem(xy_angles[i] - thetas[i-1], Float64(π), RoundNearest)
+    end
+
+    rhos = [r(φ) for φ in range(0, 2π, N+1)[1:N]]
+
+    rhos .-= (sum(rhos)/P.N - P.M/P.N)
+
+    return [rhos; thetas; 0; 0; 0]
+end
+
 function initial_data(P::Params, a::Real, b::Real; pulse::Int=1, pulse_amplitude::Real=2e-2, poly::Bool=false, reverse_phase::Bool=false, only_rho::Bool=false)
     throw("not converted to free θ(0)")
     N = P.N
