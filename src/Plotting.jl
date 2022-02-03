@@ -9,8 +9,10 @@ function init_plot(P::Params, IP::IntermediateParams, S::Stiffness, X::Vector{Fl
 
     axes = [
             M.Axis(fig[1, 1], aspect=M.AxisAspect(1)) M.Axis(fig[1, 2], title=M.L"\rho") M.Axis(fig[1, 3], title="energy");
-            M.Axis(fig[2, 1], title=M.L"\dot{\theta}, \ddot{\theta}") M.Axis(fig[2, 2], title=M.L"\beta(\rho)") M.Axis(fig[2,3], title=M.L"\int \theta")
+            M.Axis(fig[2, 1], title=M.L"\dot{\theta}, \ddot{\theta}") M.Axis(fig[2, 2], title=M.L"\beta(\rho)") M.Axis(fig[2,3])
     ]
+
+    M.hidedecorations!(axes[1, 1])
 
     M.limits!(axes[1,1], -1.5, 1.5, -1.5, 1.5)
 
@@ -62,6 +64,10 @@ function init_plot(P::Params, IP::IntermediateParams, S::Stiffness, X::Vector{Fl
         X_node[] = X
         axes[1,1].title = title
 
+        extrema_int_θ = map(x -> round(x/π; digits=3), extrema(result.int_θ_i))
+        cur_int_θ = round(result.int_θ_i[end]/π; digits=3)
+        axes[2,3].title = "$(extrema_int_θ[1])π ≤ ∫θ = $(cur_int_θ)π ≤ $(extrema_int_θ[2])π"
+
         ts_node[] = result.t_i
         energies_node[] = result.energy_i
         int_θ_node[] = result.int_θ_i
@@ -69,9 +75,15 @@ function init_plot(P::Params, IP::IntermediateParams, S::Stiffness, X::Vector{Fl
         map(M.autolimits!, axes[2:end])
     end
 
+    zipped_ρ_θ_dot_node = M.lift(c -> [[(ρ, θ_dot_node[][i]) for (i,ρ) in enumerate(c.ρ)]; (c.ρ[1], θ_dot_node[][1])], c_node)
+    colors = M.lift(z -> map(t -> t[1] > 0 ? (t[2] > 0 ? "blue" : "purple") : (t[2] > 0 ? "red" : "pink"), z), zipped_ρ_θ_dot_node)
+
     M.lines!(axes[1,1], cos.(t), sin.(t), lw=0.5, color="gray")
-    M.scatterlines!(axes[1,1], M.lift(x -> x[:,1], xy_node), M.lift(x -> x[:,2], xy_node), markersize=M.lift(x -> 10*abs.([x.ρ; x.ρ[1]]), c_node), markercolor=M.lift(x -> map(v -> v>0 ? "blue" : "red", [x.ρ; x.ρ[1]]), c_node))
-    M.scatter!(axes[1,1], M.lift(x -> [x[1,1]], xy_node), M.lift(x -> [x[1,2]], xy_node))
+    M.scatterlines!(axes[1,1], M.lift(x -> x[:,1], xy_node), M.lift(x -> x[:,2], xy_node),
+                    markersize=M.lift(x -> 10*abs.([x.ρ; x.ρ[1]]), c_node),
+                    markercolor=colors)
+                    # markercolor=M.lift(x -> map(v -> v>0 ? "blue" : "red", [x.ρ; x.ρ[1]]), )
+    # M.scatter!(axes[1,1], M.lift(x -> [x[1,1]], xy_node), M.lift(x -> [x[1,2]], xy_node))
     M.lines!(axes[1,2], t, M.lift(x -> x.ρ, c_node))
     M.hlines!(axes[1,2], ρ_equi, color="gray")
 
@@ -81,7 +93,7 @@ function init_plot(P::Params, IP::IntermediateParams, S::Stiffness, X::Vector{Fl
     M.scatterlines!(axes[2,1], t, θ_dot_node, markersize=3, color=M.RGBAf(0.8, 0.3, 0.1, 0.5))
     M.scatterlines!(axes[2,1], t, θ_dotdot_node, markersize=3, color=M.RGBAf(0.1, 0.3, 0.8, 0.5))
 
-    M.lines!(axes[2,2], t, M.lift(x -> S.beta(x.ρ), c_node))
+    M.lines!(axes[2,2], t, M.lift(x -> S.beta.(x.ρ), c_node))
     M.hlines!(axes[2,2], [0.0, S.beta(ρ_equi)], color="gray")
 
     M.lines!(axes[2,3], ts_node, int_θ_node)

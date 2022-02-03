@@ -13,6 +13,9 @@ const SA = SparseArrays
 
 import GLMakie
 
+import TOML
+import Symbolics
+
 import JankoUtils: spdiagm_const
 import EvenParam
 
@@ -168,13 +171,13 @@ function adapt_step(P::Params, IP::IntermediateParams, S::Stiffness,
     history.energy_prev = energy
     history.residual_prev = current_residual
 
-    @printf "Residual inc ratio: %.5f, δt: %.5f" residual_inc_ratio t
+    @debug @sprintf "Residual inc ratio: %.5f, δt: %.5f\n" residual_inc_ratio t
 
     return Xnew, residual, t
 end
 
 function minimizor(P::Params, IP::IntermediateParams, S::Stiffness,
-        Xinit::Vector{Float64}, SP::SolverParams=default_SP)
+        Xinit::Vector{Float64}, SP::SolverParams=SolverParams())
     matrices = assemble_fd_matrices(P, IP)
 
     # Initialization
@@ -230,7 +233,7 @@ function minimizor(P::Params, IP::IntermediateParams, S::Stiffness,
 end
 
 function build_flower(P::Params, IP::IntermediateParams, S::Stiffness,
-        Xinit::Vector{Float64}, SP::SolverParams=default_SP; include_multipliers::Bool=false)
+        Xinit::Vector{Float64}, SP::SolverParams=SolverParams(); include_multipliers::Bool=false)
     matrices = assemble_fd_matrices(P, IP)
 
     # Initialization
@@ -322,8 +325,8 @@ function compute_energy_split(P::Params, IP::IntermediateParams, S::Stiffness,
     c = X2candidate(P, X)
     ρ_dot = (circshift(c.ρ, -1) - c.ρ)/IP.Δs
     θ_dot = compute_centered_fd_θ(P, matrices, c.θ)
-    beta = S.beta(c.ρ)
-    return (0.5*P.epsilon^2*IP.Δs*sum(ρ_dot.^2), 0.5IP.Δs*sum(beta.*(θ_dot .- P.c0).^2))
+    beta = S.beta.(c.ρ)
+    return (0.5*P.µ*IP.Δs*sum(ρ_dot.^2), 0.5IP.Δs*sum(beta.*(θ_dot .- P.c0).^2))
 end
 
 function compute_energy(P::Params, IP::IntermediateParams, S::Stiffness,
@@ -331,8 +334,8 @@ function compute_energy(P::Params, IP::IntermediateParams, S::Stiffness,
     c = X2candidate(P, X)
     ρ_dot = (circshift(c.ρ, -1) - c.ρ)/IP.Δs
     θ_dot = compute_centered_fd_θ(P, matrices, c.θ)
-    beta = S.beta(c.ρ)
-    E = 0.5*P.epsilon^2*IP.Δs*sum(ρ_dot.^2) + 0.5IP.Δs*sum(beta.*(θ_dot .- P.c0).^2)
+    beta = S.beta.(c.ρ)
+    E = 0.5*P.µ*IP.Δs*sum(ρ_dot.^2) + 0.5IP.Δs*sum(beta.*(θ_dot .- P.c0).^2)
     if P.potential_range > 0
         (w, _, _) = compute_potential(P, X)
         E += IP.Δs*sum(w)
@@ -349,18 +352,18 @@ function assemble_inner_system(P::Params, IP::IntermediateParams, S::Stiffness,
     c = X2candidate(P, X)
 
     # Compute beta and derivatves
-    beta_prime_ρ = S.beta_prime(c.ρ)
-    beta_second_ρ = S.beta_second(c.ρ)
-    beta_phalf = S.beta(matrices.M_phalf*c.ρ)
-    beta_a1half = S.beta(matrices.M_mhalf*c.ρ)
-    beta_prime_phalf = S.beta_prime(matrices.M_phalf*c.ρ)
-    beta_prime_mhalf = S.beta_prime(matrices.M_mhalf*c.ρ)
+    beta_prime_ρ = S.beta_prime.(c.ρ)
+    beta_second_ρ = S.beta_second.(c.ρ)
+    beta_phalf = S.beta.(matrices.M_phalf*c.ρ)
+    beta_a1half = S.beta.(matrices.M_mhalf*c.ρ)
+    beta_prime_phalf = S.beta_prime.(matrices.M_phalf*c.ρ)
+    beta_prime_mhalf = S.beta_prime.(matrices.M_mhalf*c.ρ)
 
     # Compute upstream and downstream finite differences of θ
     _, θ_prime_up, θ_prime_down = compute_fd_θ(P, matrices, c.θ)
     θ_prime_centered = compute_centered_fd_θ(P, matrices, c.θ)
 
-    A_E1_ρ = P.epsilon^2 * matrices.D2 - 0.5*beta_second_ρ.*(θ_prime_centered .- P.c0).^2 .*Matrix{Float64}(LA.I, N, N)
+    A_E1_ρ = P.µ * matrices.D2 - 0.5*beta_second_ρ.*(θ_prime_centered .- P.c0).^2 .*Matrix{Float64}(LA.I, N, N)
     if P.potential_range > 0
         (_, _, w_second) = compute_potential(P, X)
         A_E1_ρ .-= w_second .* Matrix{Float64}(LA.I, N, N)
@@ -398,15 +401,15 @@ function compute_residual(P::Params, IP::IntermediateParams, S::Stiffness,
     c = X2candidate(P, X)
 
     # Compute beta and derivatves
-    beta_prime_ρ = S.beta_prime(c.ρ)
-    beta_phalf = S.beta(matrices.M_phalf*c.ρ)
-    beta_a1half = S.beta(matrices.M_mhalf*c.ρ)
+    beta_prime_ρ = S.beta_prime.(c.ρ)
+    beta_phalf = S.beta.(matrices.M_phalf*c.ρ)
+    beta_a1half = S.beta.(matrices.M_mhalf*c.ρ)
 
     # Compute upstream and downstream finite differences of θ
     _, θ_prime_up, θ_prime_down = compute_fd_θ(P, matrices, c.θ)
 
     # Compute residuals for ρ
-    b_E1 = P.epsilon^2 * (matrices.D2 * c.ρ) - 0.5*beta_prime_ρ.*(compute_centered_fd_θ(P, matrices, c.θ) .- P.c0).^2 + c.λM*ones(N)
+    b_E1 = P.µ * (matrices.D2 * c.ρ) - 0.5*beta_prime_ρ.*(compute_centered_fd_θ(P, matrices, c.θ) .- P.c0).^2 + c.λM*ones(N)
     if P.potential_range > 0
         (_, w_prime, _) = compute_potential(P, X)
         b_E1 -= w_prime
@@ -467,142 +470,6 @@ function assemble_fd_matrices(P::Params, IP::IntermediateParams)
     return M
 end
 
-function initial_data_smooth(P::Params; sides::Int=1, smoothing::Float64, reverse_phase::Bool=false, only_rho::Bool=false)
-    if P.N % sides != 0
-        error("N must be dividible by the number of sides")
-    end
-
-    if !(0 <= smoothing <= 1)
-        error("smoothing parameter must be between 0 and 1")
-    end
-
-    Δs = P.L/P.N
-
-    k = Int64(P.N / sides)
-    N_straight = floor(Int64, P.N/sides*(1-smoothing))
-
-    if only_rho
-        thetas = collect(range(0, 2π, length=P.N+1))[1:end-1]
-    else
-        thetas_1p = [zeros(N_straight); [2π/sides - i*Δs/smoothing for i in (k-N_straight-1):-1:0]]
-        thetas = repeat(thetas_1p, sides) + repeat(2π/sides*(0:sides-1), inner=k)
-    end
-
-    if reverse_phase
-        rho = sin.(range(0, π, length=N_straight))
-        rho /= (P.M/sides/(N_straight)) / sum(rho)
-        rhos = repeat([rho; zeros(k-N_straight)], sides)
-    else
-        rhos = repeat([zeros(N_straight); P.M/(2π*smoothing)*ones(k-N_straight)], sides)
-    end
-
-
-    # FIXME
-    k = 6
-    thetas = circshift(thetas, -k)
-    thetas[end-(k-1):end] .+= 2π
-
-    return [P.M/P.L*ones(P.N); thetas; 0; 0; 0]
-end
-
-function initial_data_polar(P::Params; r::Function)
-    N = P.N
-
-    # oversample the curve
-    φs = collect(range(0, 2π, length=10N + 1))[1:10N]
-
-    x = [r(φ)*cos(φ) for φ in φs]
-    y = [r(φ)*sin(φ) for φ in φs]
-    xy = [x y]
-
-    # resample to get evenly spaced nodes
-    xy_even = EvenParam.reparam(xy; closed=true, new_N = N)
-
-    # Recenter
-    xy_even = xy_even .- [xy_even[1,1] xy_even[1,2]]
-
-    # Rotate so that the first segment is parallel to the x axis
-    xy_even_c = xy_even[:,1] + xy_even[:,2]*im
-    alpha = angle(xy_even_c[2])
-    xy_even_c = xy_even_c.*exp.(-im*alpha)
-
-    # Compute tangential angles
-    xy_even = [real.(xy_even_c) imag.(xy_even_c)]
-    xy_diff = circshift(xy_even, -1) - xy_even
-    xy_angles = angle.(xy_diff[:,1]+xy_diff[:,2]*im)
-
-    thetas = zeros(N)
-    thetas[1] = xy_angles[1]
-    for i in 2:N
-        thetas[i] = thetas[i-1] + rem(xy_angles[i] - thetas[i-1], Float64(π), RoundNearest)
-    end
-
-    rhos = [r(φ) for φ in range(0, 2π, N+1)[1:N]]
-
-    rhos .-= (sum(rhos)/P.N - P.M/P.N)
-
-    return [rhos; thetas; 0; 0; 0]
-end
-
-function initial_data(P::Params, a::Real, b::Real; pulse::Int=1, pulse_amplitude::Real=2e-2, poly::Bool=false, reverse_phase::Bool=false, only_rho::Bool=false)
-    throw("not converted to free θ(0)")
-    N = P.N
-
-    # Construct the ellipsis and reparameterize it
-    if poly && (pulse > 2)
-        x = [real(exp(2π*im*k/pulse)) for k in 0:(pulse-1)]
-        y = [imag(exp(2π*im*k/pulse)) for k in 0:(pulse-1)]
-        xy = [x y]
-    else
-        t = collect(range(-π/2, 3π/2, length=10N+1)[1:10N])
-        xy = [a*cos.(t) b*sin.(t)]
-    end
-    xy_even = EvenParam.reparam(xy; closed=true, new_N = N)
-
-    # Recenter
-    xy_even = xy_even .- [xy_even[1,1] xy_even[1,2]]
-
-    # Rotate so that the first segment is parallel to the x axis
-    xy_even_c = xy_even[:,1] + xy_even[:,2]*im
-    alpha = angle(xy_even_c[2])
-    xy_even_c = xy_even_c.*exp.(-im*alpha)
-
-    # Compute tangential angles:w
-    xy_even = [real.(xy_even_c) imag.(xy_even_c)]
-    xy_diff = circshift(xy_even, -1) - xy_even
-    xy_angles = angle.(xy_diff[:,1]+xy_diff[:,2]*im)
-
-    thetas = zeros(N-1)
-    thetas[1] = xy_angles[2]
-    for i in 2:N-1
-        thetas[i] = thetas[i-1] + rem(xy_angles[i+1] - thetas[i-1], Float64(π), RoundNearest)
-    end
-
-    # FIXME: shift the initial condition
-    t = collect(range(0, 2π, length=N+1)[1:N])
-
-    if pulse > 0
-        # To check, 1 was P.beta_a1
-        thetas += 1.0/P.mode_j*pulse_amplitude*sin.(pulse*t[2:N])
-    end
-
-    rhos = P.M/2π*ones(N)
-
-    if pulse > 0
-        if reverse_phase
-            f = -1
-        else
-            f = 1
-        end
-        rhos -= pulse_amplitude*f*cos.(pulse*t)
-    end
-
-    if only_rho
-        thetas = collect(range(0, 2π, length=P.N+1))[2:end-1]
-    end
-
-    return [rhos; thetas; 0; 0; 0]
-end
 
 function g(x::Vector{Float64}, α::Float64)
     return @. -min(α*x-1, 0.0)^2 * log(α*x)
@@ -644,7 +511,8 @@ function linreg(xi, fi)
 end
 
 function do_flow(P::Params, S::Stiffness, Xinit::Vector{Float64}, solver_params::SolverParams;
-        do_plot::Bool=false, include_multipliers::Bool=false, record_movie::Bool=false)
+        do_plot::Bool=false, include_multipliers::Bool=false, record_movie::Bool=false, pause_after_init::Bool=false,
+        plot_each_iter::Int64=1)
 
     IP = compute_intermediate(P, S)
 
@@ -656,6 +524,10 @@ function do_flow(P::Params, S::Stiffness, Xinit::Vector{Float64}, solver_params:
 
     if do_plot
         fig, update_plot = init_plot(P, IP, S, Xx)
+        if pause_after_init
+            println("Hit enter to start.")
+            readline()
+        end
     end
 
     flower = build_flower(P, IP, S, Xx, solver_params; include_multipliers=include_multipliers)
@@ -672,7 +544,7 @@ function do_flow(P::Params, S::Stiffness, Xinit::Vector{Float64}, solver_params:
         Xx .= res.sol
         n = res.iter
 
-        if n % 1 == 0
+        if n % plot_each_iter == 0
             println()
             print(n)
 
@@ -708,6 +580,153 @@ function do_flow(P::Params, S::Stiffness, Xinit::Vector{Float64}, solver_params:
             iter_flower(1)
         end
     end
+end
+
+function initial_data_smooth(P::Params; sides::Int=1, smoothing::Float64, reverse_phase::Bool=false, only_rho::Bool=false,
+    rho_amplitude::Float64=1.0, rho_phase::Float64=0.0)
+    if P.N % sides != 0
+        error("N must be dividible by the number of sides")
+    end
+
+    if !(0 <= smoothing <= 1)
+        error("smoothing parameter must be between 0 and 1")
+    end
+
+    Δs = P.L/P.N
+
+    k = Int64(P.N / sides)
+    N_straight = floor(Int64, P.N/sides*(1-smoothing))
+
+    if only_rho
+        thetas = collect(range(0, 2π, length=P.N+1))[1:end-1]
+    else
+        thetas_1p = [zeros(N_straight); [2π/sides - i*Δs/smoothing for i in (k-N_straight-1):-1:0]]
+        thetas = repeat(thetas_1p, sides) + repeat(2π/sides*(0:sides-1), inner=k)
+    end
+
+    rhos = [cos.(2π*φ*sides/P.L) for φ in range(0, 2π, P.N+1)[1:P.N]]
+    extrema_rho = extrema(rhos)
+    p2p_rho = extrema_rho[2] - extrema_rho[1]
+    if p2p_rho > 1e-7
+        rhos .= (rhos .- extrema_rho[1])/p2p_rho*rho_amplitude
+    else
+        @warn "The provided function r has very low amplitude, not rescaling ρ"
+    end
+
+    rhos .-= (sum(rhos)/P.N - P.M/P.N)
+
+    return [rhos; thetas; 0; 0; 0]
+end
+
+function initial_data_polar(P::Params, r::Function, rho_amplitude::Float64=1.0, rho_phase::Float64=0.0)
+    N = P.N
+
+    # oversample the curve
+    oversample_N = 100N
+    φs = collect(range(0, 2π, length=oversample_N + 1))[1:oversample_N]
+
+    x = r.(φs).*cos.(φs)
+    y = r.(φs).*sin.(φs)
+    xy = [x y]
+
+    # resample to get evenly spaced nodes
+    xy_even = EvenParam.reparam(xy; closed=true, new_N = N)
+
+    # Recenter
+    xy_even = xy_even .- [xy_even[1,1] xy_even[1,2]]
+
+    # Rotate so that the first segment is parallel to the x axis
+    xy_even_c = xy_even[:,1] + xy_even[:,2]*im
+    alpha = angle(xy_even_c[2])
+    xy_even_c = xy_even_c.*exp.(-im*alpha)
+
+    # Compute tangential angles
+    xy_even = [real.(xy_even_c) imag.(xy_even_c)]
+    xy_diff = circshift(xy_even, -1) - xy_even
+    xy_angles = angle.(xy_diff[:,1]+xy_diff[:,2]*im)
+
+    thetas = zeros(N)
+    thetas[1] = xy_angles[1]
+    for i in 2:N
+        thetas[i] = thetas[i-1] + rem(xy_angles[i] - thetas[i-1], Float64(π), RoundNearest)
+    end
+
+    φs = range(0, 2π, N+1)[1:N]
+    rhos = r.(φs .+ rho_phase)
+    extrema_rho = extrema(rhos)
+    p2p_rho = extrema_rho[2] - extrema_rho[1]
+    if p2p_rho > 1e-7
+        rhos .= (rhos .- extrema_rho[1])/p2p_rho*rho_amplitude
+    else
+        @warn "The provided function r has very low amplitude, not rescaling ρ"
+    end
+
+    rhos .-= (sum(rhos)/P.N - P.M/P.N)
+
+    return [rhos; thetas; 0; 0; 0]
+end
+
+function eval_if_string(v)
+    if typeof(v) == String
+        return eval(Meta.parse(v))
+    else
+        return v
+    end
+end
+
+function initial_data_from_dict(P, d, r_func)
+    if d["type"] == "star"
+        rho_phase = eval_if_string(d["rho_phase"])
+        rho_amplitude = eval_if_string(d["rho_amplitude"])
+        return initial_data_polar(P, r_func, rho_amplitude, rho_phase)
+    elseif d["type"] == "polygon"
+        kw = filter(x -> !(x[1] in [:type, :r_key]), collect(zip(map(Symbol, collect(keys(d))), values(d))))
+        return initial_data_smooth(P; kw...)
+    else
+        throw("Unknown initial data type")
+    end
+end
+
+function parse_configuration(filename::String, function_defs::Dict)
+    T = TOML.parsefile(filename)
+    x = Symbolics.variable(:x)
+
+    # Model parameters
+    N  = eval_if_string(T["model"]["N"])
+    L  = eval_if_string(T["model"]["L"])
+    M  = eval_if_string(T["model"]["M"])
+    c0 = eval_if_string(T["model"]["c0"])
+    mu = eval_if_string(T["model"]["mu"])
+
+    # unused
+    ρ_max = 1000
+    potential_range = -1
+
+    P = Params(N=N, L=L, M=M, c0=c0, μ=mu, ρ_max=ρ_max, potential_range=potential_range)
+
+    # Solver parameters
+    solver_params = SolverParams(;zip(map(Symbol, collect(keys(T["solver"]))), values(T["solver"]))...)
+
+    # Stiffness and initial data r(φ) functions
+
+    local beta = function_defs[:beta][T["model"]["beta_key"]]
+    local r = function_defs[:r][get(T["initial_data"], "r_key", "default")]
+
+    beta_expr = beta(x)
+    beta_prime_expr = Symbolics.derivative(beta_expr, x)
+    beta_second_expr = Symbolics.derivative(beta_prime_expr, x)
+
+    beta_prime = Symbolics.build_function(beta_prime_expr, x; expression=Val{false})
+    beta_second = Symbolics.build_function(beta_second_expr, x; expression=Val{false})
+
+    S = Stiffness(beta=beta, beta_prime=beta_prime, beta_second=beta_second)
+
+    options = zip(map(Symbol, collect(keys(T["options"]))), values(T["options"]))
+
+    # Initial condition
+    Xinit = initial_data_from_dict(P, T["initial_data"], r)
+
+    return P, S, Xinit, solver_params, options
 end
 
 end # module
