@@ -8,13 +8,19 @@ function init_plot(P::Params, IP::IntermediateParams, S::Stiffness, X::Vector{Fl
     fig = M.Figure(resolution = (1600, 900))
 
     axes = [
-            M.Axis(fig[1, 1], aspect=M.AxisAspect(1)) M.Axis(fig[1, 2], title=M.L"\rho") M.Axis(fig[1, 3], title="energy");
+            M.Axis(fig[1, 1], aspect=M.AxisAspect(1)) M.Axis(fig[1, 2], title=M.L"\rho") M.Axis(fig[1, 3], title="← Energy | Residual →", xscale=log10);
             M.Axis(fig[2, 1], title=M.L"\dot{\theta}, \ddot{\theta}") M.Axis(fig[2, 2], title=M.L"\beta(\rho)") M.Axis(fig[2,3])
     ]
 
+    dual_axes = [M.Axis(fig[1, 3], yticklabelcolor = :red, yaxisposition = :right, xscale=log10, yscale=log10)]
+    M.hidexdecorations!(dual_axes[1,1])
+    M.hidespines!(dual_axes[1,1])
     M.hidedecorations!(axes[1, 1])
 
     M.limits!(axes[1,1], -1.5, 1.5, -1.5, 1.5)
+
+    M.limits!(axes[1,3], 0.5, 1.5, 0.5, 1.5)
+    M.limits!(dual_axes[1,1], 0.5, 1.5, 0.5, 1.5)
 
     N = P.N
     Δs = IP.Δs
@@ -46,6 +52,7 @@ function init_plot(P::Params, IP::IntermediateParams, S::Stiffness, X::Vector{Fl
     ts_node = M.Observable([0.0])
     energies_node = M.Observable([0.0])
     int_θ_node = M.Observable([0.0])
+    residual_norm_node = M.Observable([0.0])
 
     ρ_equi = P.M / P.L
     k_equi = P.L / 2π
@@ -68,11 +75,13 @@ function init_plot(P::Params, IP::IntermediateParams, S::Stiffness, X::Vector{Fl
         cur_int_θ = round(result.int_θ_i[end]/π; digits=3)
         axes[2,3].title = "$(extrema_int_θ[1])π ≤ ∫θ = $(cur_int_θ)π ≤ $(extrema_int_θ[2])π"
 
-        ts_node[] = result.t_i
+        ts_node[] = result.t_i .+ 1
         energies_node[] = result.energy_i
         int_θ_node[] = result.int_θ_i
+        residual_norm_node[] = result.residual_norm_i
 
         map(M.autolimits!, axes[2:end])
+        map(M.autolimits!, dual_axes)
     end
 
     zipped_ρ_θ_dot_node = M.lift(c -> [[(ρ, θ_dot_node[][i]) for (i,ρ) in enumerate(c.ρ)]; (c.ρ[1], θ_dot_node[][1])], c_node)
@@ -80,8 +89,9 @@ function init_plot(P::Params, IP::IntermediateParams, S::Stiffness, X::Vector{Fl
 
     M.lines!(axes[1,1], cos.(t), sin.(t), lw=0.5, color="gray")
     M.scatterlines!(axes[1,1], M.lift(x -> x[:,1], xy_node), M.lift(x -> x[:,2], xy_node),
-                    markersize=M.lift(x -> 10*abs.([x.ρ; x.ρ[1]]), c_node),
+                    markersize=M.lift(x -> 1*abs.([x.ρ; x.ρ[1]]), c_node),
                     markercolor=colors)
+    M.lines!(axes[1,1], M.lift(x -> x[:,1], xy_node), M.lift(x -> x[:,2], xy_node), color="white", linewidth=0.3)
                     # markercolor=M.lift(x -> map(v -> v>0 ? "blue" : "red", [x.ρ; x.ρ[1]]), )
     # M.scatter!(axes[1,1], M.lift(x -> [x[1,1]], xy_node), M.lift(x -> [x[1,2]], xy_node))
     M.lines!(axes[1,2], t, M.lift(x -> x.ρ, c_node))
@@ -89,6 +99,8 @@ function init_plot(P::Params, IP::IntermediateParams, S::Stiffness, X::Vector{Fl
 
     M.lines!(axes[1,3], ts_node, energies_node)
     M.hlines!(axes[1,3], energy_circle, color="gray")
+
+    M.lines!(dual_axes[1,1], ts_node, residual_norm_node, color="red")
 
     M.scatterlines!(axes[2,1], t, θ_dot_node, markersize=3, color=M.RGBAf(0.8, 0.3, 0.1, 0.5))
     M.scatterlines!(axes[2,1], t, θ_dotdot_node, markersize=3, color=M.RGBAf(0.1, 0.3, 0.8, 0.5))
