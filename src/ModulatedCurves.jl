@@ -707,19 +707,27 @@ function parse_configuration(filename::String, function_defs::Dict)
     # Solver parameters
     solver_params = SolverParams(;zip(map(Symbol, collect(keys(T["solver"]))), values(T["solver"]))...)
 
+    # Stiffness parameters
+    stiffness_key = T["model"]["stiffness"]["key"]
+    stiffness_params_dict = T["model"]["stiffness"]["parameters"][stiffness_key]
+    # Convert Dict{String,Any} to NamedTuple
+    stiffness_params = NamedTuple{Tuple(Symbol.(keys(stiffness_params_dict)))}((values(stiffness_params_dict)))
+
     # Stiffness and initial data r(φ) functions
 
-    local beta = function_defs[:beta][T["model"]["beta_key"]]
+    local beta = function_defs[:beta][stiffness_key]
     local r = function_defs[:r][get(T["initial_data"], "r_key", "default")]
 
-    beta_expr = beta(x)
+    beta_expr = beta(x, stiffness_params)
     beta_prime_expr = Symbolics.derivative(beta_expr, x)
     beta_second_expr = Symbolics.derivative(beta_prime_expr, x)
 
     beta_prime = Symbolics.build_function(beta_prime_expr, x; expression=Val{false})
     beta_second = Symbolics.build_function(beta_second_expr, x; expression=Val{false})
 
-    S = Stiffness(beta=beta, beta_prime=beta_prime, beta_second=beta_second)
+    S = Stiffness(beta=(x) -> beta(x,stiffness_params),
+                  beta_prime=beta_prime,
+                  beta_second=beta_second)
 
     options = zip(map(Symbol, collect(keys(T["options"]))), values(T["options"]))
 
