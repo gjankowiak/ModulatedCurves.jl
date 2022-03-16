@@ -60,6 +60,8 @@ end
     sol::Vector{Float64}
     iter::Int64
     energy_i::Vector{Float64}
+    energy_ρ_i::Vector{Float64}
+    energy_θ_i::Vector{Float64}
     residual_norm_i::Vector{Float64}
     t_i::Vector{Float64}
     int_θ_i::Vector{Float64}

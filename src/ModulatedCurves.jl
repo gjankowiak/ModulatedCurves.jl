@@ -190,6 +190,10 @@ function minimizor(P::Params, IP::IntermediateParams, S::Stiffness,
     residual = compute_residual(P, IP, S, matrices, X)
 
     energy_i = zeros(SP.max_iter)
+
+    energy_ρ_i = zeros(SP.max_iter)
+    energy_θ_i = zeros(SP.max_iter)
+
     residual_norm_i = zeros(SP.max_iter)
 
     history.energy_prev = energy_i[1]
@@ -218,16 +222,16 @@ function minimizor(P::Params, IP::IntermediateParams, S::Stiffness,
 
         # Compute residual norm and energy
         residual_norm = LA.norm(residual)
-        energy = compute_energy(P, IP, S, matrices, X)
-        energy_i[n] = energy
+        energy_ρ_i[n], energy_θ_i[n] = compute_energy_split(P, IP, S, matrices, X)
+        energy_i[n] = energy_ρ_i[n] + energy_θ_i[n]
         residual_norm_i[n] = residual_norm
 
         converged = (LA.norm(residual - history.residual_prev) < SP.rtol) || (LA.norm(residual) < SP.atol)
 
-        history.energy_prev = energy
+        history.energy_prev = energy_i[n]
         history.residual_prev = residual
 
-        res = Result(X, n, energy_i, residual_norm_i, converged, converged || (n>=SP.max_iter))
+        res = Result(X, n, energy_i, energy_ρ_i, energy_θ_i, residual_norm_i, converged, converged || (n>=SP.max_iter))
         return res
     end
 end
@@ -246,7 +250,9 @@ function build_flower(P::Params, IP::IntermediateParams, S::Stiffness,
 
     residual = compute_residual(P, IP, S, matrices, X)
 
-    energy_i = [compute_energy(P, IP, S, matrices, X)]
+    eρ, eθ = compute_energy_split(P, IP, S, matrices, X)
+    energy_i, energy_ρ_i, energy_θ_i = [eρ + eθ], [eρ], [eθ]
+
     residual_norm_i = [LA.norm(residual)]
     int_θ_i = [sum(c.θ)*IP.Δs]
     t_i = [0.0]
@@ -292,8 +298,11 @@ function build_flower(P::Params, IP::IntermediateParams, S::Stiffness,
 
         # Compute residual norm and energy
         residual_norm = LA.norm(residual)
-        energy = compute_energy(P, IP, S, matrices, X)
+        eρ, eθ = compute_energy_split(P, IP, S, matrices, X)
+        energy = eρ + eθ
         push!(energy_i, energy)
+        push!(energy_ρ_i, eρ)
+        push!(energy_θ_i, eθ)
         push!(residual_norm_i, residual_norm)
 
         push!(t_i, t_i[end] + step_size)
@@ -314,7 +323,7 @@ function build_flower(P::Params, IP::IntermediateParams, S::Stiffness,
         history.energy_prev = energy
         history.residual_prev = residual
 
-        res = Result(X, n, energy_i, residual_norm_i, t_i, int_θ_i, converged, converged || (n>=SP.max_iter))
+        res = Result(X, n, energy_i, energy_ρ_i, energy_θ_i, residual_norm_i, t_i, int_θ_i, converged, converged || (n>=SP.max_iter))
 
         return res
     end
@@ -331,16 +340,7 @@ end
 
 function compute_energy(P::Params, IP::IntermediateParams, S::Stiffness,
         matrices::FDMatrices, X::Vector{Float64})
-    c = X2candidate(P, X)
-    ρ_dot = (circshift(c.ρ, -1) - c.ρ)/IP.Δs
-    θ_dot = compute_centered_fd_θ(P, matrices, c.θ)
-    beta = S.beta.(c.ρ)
-    E = 0.5*P.µ*IP.Δs*sum(ρ_dot.^2) + 0.5IP.Δs*sum(beta.*(θ_dot .- P.c0).^2)
-    if P.potential_range > 0
-        (w, _, _) = compute_potential(P, X)
-        E += IP.Δs*sum(w)
-    end
-    return E
+    return sum(compute_energy_split(P, IP, S, matrices, X))
 end
 
 function assemble_inner_system(P::Params, IP::IntermediateParams, S::Stiffness,
@@ -512,7 +512,7 @@ end
 
 function do_flow(P::Params, S::Stiffness, Xinit::Vector{Float64}, solver_params::SolverParams;
         do_plot::Bool=false, include_multipliers::Bool=false, record_movie::Bool=false, pause_after_init::Bool=false,
-        plot_each_iter::Int64=1)
+        plot_each_iter::Int64=1, pause_after_plot::Bool=false)
 
     IP = compute_intermediate(P, S)
 
@@ -545,20 +545,25 @@ function do_flow(P::Params, S::Stiffness, Xinit::Vector{Float64}, solver_params:
         n = res.iter
 
         if n % plot_each_iter == 0
-            println()
-            print(n)
+            # println()
+            # print(n)
 
-            print(", energy/rel: ")
-            print(res.energy_i[n], "/", res.energy_i[n] - energy_circle)
-            print(", residual norm: ")
-            print(res.residual_norm_i[n])
-            print(", min/max ρ: ")
-            @show extrema(view(Xx, 1:P.N))
+            # print(", energy/rel: ")
+            # print(res.energy_i[n], "/", res.energy_i[n] - energy_circle)
+            # print(", residual norm: ")
+            # print(res.residual_norm_i[n])
+            # print(", min/max ρ: ")
+            # @show extrema(view(Xx, 1:P.N))
             if do_plot
                 update_plot(res.sol, (@sprintf "%d, energy/rel: %.4f/%.4f" n res.energy_i[n]  (res.energy_i[n] - energy_circle)), res)
+                if pause_after_plot
+                    print("Press Enter to continue ")
+                    readline()
+                end
             end
+            sleep(0.01)
         else
-            print(".")
+            # print(".")
         end
 
         if res.finished || res.residual_norm_i[n] > 1e10
@@ -618,15 +623,20 @@ function initial_data_smooth(P::Params; sides::Int=1, smoothing::Float64, revers
     return [rhos; thetas; 0; 0; 0]
 end
 
-function initial_data_polar(P::Params, r::Function, rho_amplitude::Float64=1.0, rho_phase::Float64=0.0)
+function initial_data_polar(P::Params, r::Function, r_params::NamedTuple)
     N = P.N
+
+    rho_amplitude = r_params.rho_amplitude
+    rho_phase = r_params.rho_phase
 
     # oversample the curve
     oversample_N = 100N
     φs = collect(range(0, 2π, length=oversample_N + 1))[1:oversample_N]
 
-    x = r.(φs).*cos.(φs)
-    y = r.(φs).*sin.(φs)
+    r_parameterized = (φ) -> r(φ, r_params)
+
+    x = r_parameterized.(φs).*cos.(φs)
+    y = r_parameterized.(φs).*sin.(φs)
     xy = [x y]
 
     # resample to get evenly spaced nodes
@@ -652,7 +662,7 @@ function initial_data_polar(P::Params, r::Function, rho_amplitude::Float64=1.0, 
     end
 
     φs = range(0, 2π, N+1)[1:N]
-    rhos = r.(φs .+ rho_phase)
+    rhos = r_parameterized.(φs .+ rho_phase)
     extrema_rho = extrema(rhos)
     p2p_rho = extrema_rho[2] - extrema_rho[1]
     if p2p_rho > 1e-7
@@ -675,12 +685,15 @@ function eval_if_string(v)
 end
 
 function initial_data_from_dict(P, d, r_func)
+    d_params = d["parameters"][d["type"]]
+
     if d["type"] == "star"
-        rho_phase = eval_if_string(d["rho_phase"])
-        rho_amplitude = eval_if_string(d["rho_amplitude"])
-        return initial_data_polar(P, r_func, rho_amplitude, rho_phase)
+        # Convert Dict{String,Any} to NamedTuple
+        r_params = NamedTuple{Tuple(Symbol.(keys(d_params)))}((values(d_params)))
+        @show r_params
+        return initial_data_polar(P, r_func, r_params)
     elseif d["type"] == "polygon"
-        kw = filter(x -> !(x[1] in [:type, :r_key]), collect(zip(map(Symbol, collect(keys(d))), values(d))))
+        kw = filter(x -> !(x[1] in [:type, :r_key]), collect(zip(map(Symbol, collect(keys(d_params))), values(d_params))))
         return initial_data_smooth(P; kw...)
     else
         throw("Unknown initial data type")
@@ -728,6 +741,51 @@ function parse_configuration(filename::String, function_defs::Dict)
     S = Stiffness(beta=(x) -> beta(x,stiffness_params),
                   beta_prime=beta_prime,
                   beta_second=beta_second)
+
+    # Possible bifurcations
+    rho_eq = P.M/P.L
+    b_eq, bp_eq, bpp_eq = S.beta(rho_eq), S.beta_prime(rho_eq), S.beta_second(rho_eq)
+
+    spont_curv_coef = abs(P.c0 - 2π/P.L)
+
+    can_bifurcate = (bp_eq^2 - 0.5b_eq*bpp_eq > 0) && (spont_curv_coef > 1e-8)
+
+    if spont_curv_coef <= 1e-8
+        @warn "The spontaneous curvature term (2π/L - c0) is very small!"
+    end
+
+    if can_bifurcate
+        f = (2π/P.L - P.c0)
+        µ1 = -0.5f^2*bpp_eq
+        µk = [µ1; [(f/k)^2*(bp_eq^2/b_eq - 0.5bpp_eq) for k in 2:20]]
+        js = 1:length(µk)
+        µk_js = collect(zip(μk, js))
+        sort!(μk_js, lt=(x,y) -> x[1] < y[1], rev=true)
+    else
+        µk_js = []
+    end
+
+    none = true
+
+    i = 1
+    while i <= length(μk_js) && µk_js[i][1] > P.µ
+        µc, j = μk_js[i]
+        if none
+            @info "Birfucations expected for the following values of µ:"
+            none = false
+        end
+        @info "j=$j, µc=$µc"
+        i += 1
+    end
+
+    if none
+        @warn "No birfucations from the circle, expect convergence to trivial state"
+    end
+
+    if i < length(µk_js)
+        µc, j = μk_js[i]
+        @info "Next bifurcation: j=$j, μc = $μc"
+    end
 
     options = zip(map(Symbol, collect(keys(T["options"]))), values(T["options"]))
 
