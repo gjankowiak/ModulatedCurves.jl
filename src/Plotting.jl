@@ -9,7 +9,7 @@ end
 
 function init_plot(P::Params, IP::IntermediateParams, S::Stiffness, X::Vector{Float64}; label::String="")
 
-    matrices = assemble_fd_matrices(P, IP)
+    matrices = assemble_fd_matrices(P, IP; winding_number=compute_winding_number(P, X))
 
     fig = M.Figure(resolution = (1600, 900))
 

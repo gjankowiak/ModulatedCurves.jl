@@ -176,9 +176,14 @@ function adapt_step(P::Params, IP::IntermediateParams, S::Stiffness,
     return Xnew, residual, t
 end
 
+function compute_winding_number(P::Params, X::Vector{Float64})
+    c = X2candidate(P, X)
+    return round(Int, (c.θ[end] - c.θ[1])/2π)
+end
+
 function minimizor(P::Params, IP::IntermediateParams, S::Stiffness,
         Xinit::Vector{Float64}, SP::SolverParams=SolverParams())
-    matrices = assemble_fd_matrices(P, IP)
+    matrices = assemble_fd_matrices(P, IP; winding_number=compute_winding_number(P, Xinit))
 
     # Initialization
     history = History(0, zeros(2*P.N+3))
@@ -238,7 +243,7 @@ end
 
 function build_flower(P::Params, IP::IntermediateParams, S::Stiffness,
         Xinit::Vector{Float64}, SP::SolverParams=SolverParams(); include_multipliers::Bool=false)
-    matrices = assemble_fd_matrices(P, IP)
+    matrices = assemble_fd_matrices(P, IP; winding_number=compute_winding_number(P, Xinit))
 
     # Initialization
     history = History(0, zeros(2*P.N+3))
@@ -432,9 +437,11 @@ function compute_centered_fd_θ(P::Params, matrices::FDMatrices, θ::Union{Vecto
     return matrices.D1c*θ + matrices.D1c_rhs
 end
 
-function assemble_fd_matrices(P::Params, IP::IntermediateParams)
+function assemble_fd_matrices(P::Params, IP::IntermediateParams; winding_number::Int64=1)
     N = P.N
     Δs = IP.Δs
+
+    w = winding_number
 
     M = FDMatrices(
                    # Matrices for i+1/2 and i-1/2 values
@@ -452,7 +459,7 @@ function assemble_fd_matrices(P::Params, IP::IntermediateParams)
                                 N-1 => -ones(2))[1:N+1,1:N])/Δs,
 
                    # Affine term for up/downstream finite differences
-                   [2π/Δs; zeros(N-1); 2π/Δs],
+                   [w*2π/Δs; zeros(N-1); w*2π/Δs],
 
                    # Matrix for centered finite differences
                    (SA.spdiagm(1-N =>  ones(1),
@@ -461,7 +468,7 @@ function assemble_fd_matrices(P::Params, IP::IntermediateParams)
                                N-1 => -ones(1)))*0.5/Δs,
 
                    # Affine term for centered finite differences
-                   [π/Δs; zeros(N-2); π/Δs],
+                   [w*π/Δs; zeros(N-2); w*π/Δs],
 
                    # Matrix for 2nd order finite difference
                    spdiagm_const([1.0, -2.0, 1.0], [-1, 0, 1], N)/Δs^2

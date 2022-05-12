@@ -1,6 +1,6 @@
 function check_differential(P::Params, S::Stiffness, X::Vector{Float64})
     IP = compute_intermediate(P, S)
-    matrices = assemble_fd_matrices(P, IP)
+    matrices = assemble_fd_matrices(P, IP; winding_number=compute_winding_number(P, X))
 
     @show matrices.D1
 

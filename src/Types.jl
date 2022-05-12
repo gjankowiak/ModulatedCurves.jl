@@ -1,6 +1,6 @@
 using Base: @kwdef
 
-@kwdef struct Params
+@kwdef mutable struct Params
     # Discretization parameters
     N::Int64
     L::Float64
