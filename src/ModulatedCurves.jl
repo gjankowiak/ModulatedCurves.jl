@@ -588,10 +588,12 @@ function do_flow(P::Params, S::Stiffness, Xinit::Vector{Float64}, solver_params:
 end
 
 function initial_data_smooth(P::Params; sides::Int=1, smoothing::Float64, reverse_phase::Bool=false, only_rho::Bool=false,
-    rho_amplitude::Float64=1.0, rho_phase::Float64=0.0)
+    rho_amplitude::Float64=1.0, rho_phase::Float64=0.0, rho_wave_number::Int64=0)
     if P.N % sides != 0
         error("N must be dividible by the number of sides")
     end
+
+    rwn = rho_wave_number == 0 ? sides : rho_wave_number
 
     if !(0 <= smoothing <= 1)
         error("smoothing parameter must be between 0 and 1")
@@ -609,7 +611,7 @@ function initial_data_smooth(P::Params; sides::Int=1, smoothing::Float64, revers
         thetas = repeat(thetas_1p, sides) + repeat(2π/sides*(0:sides-1), inner=k)
     end
 
-    rhos = [cos.(2π*φ*sides/P.L) for φ in range(0, 2π, P.N+1)[1:P.N]]
+    rhos = [cos.(2π*φ*rwn/P.L) for φ in range(0, 2π, P.N+1)[1:P.N]]
     extrema_rho = extrema(rhos)
     p2p_rho = extrema_rho[2] - extrema_rho[1]
     if p2p_rho > 1e-7
@@ -631,7 +633,7 @@ function initial_data_polar(P::Params, r::Function, r_params::NamedTuple)
 
     # oversample the curve
     oversample_N = 100N
-    φs = collect(range(0, 2π, length=oversample_N + 1))[1:oversample_N]
+    φs = collect(range(0, r_params.s_max, length=oversample_N + 1))[1:oversample_N]
 
     r_parameterized = (φ) -> r(φ, r_params)
 
@@ -640,6 +642,7 @@ function initial_data_polar(P::Params, r::Function, r_params::NamedTuple)
     xy = [x y]
 
     # resample to get evenly spaced nodes
+    # xy_even = EvenParam.reparam(xy; closed=true, new_N = N+1)[1:N,:]
     xy_even = EvenParam.reparam(xy; closed=true, new_N = N)
 
     # Recenter
