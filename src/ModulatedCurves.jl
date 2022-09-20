@@ -11,7 +11,7 @@ const LA = LinearAlgebra
 import SparseArrays
 const SA = SparseArrays
 
-import GLMakie
+# import GLMakie
 
 import TOML
 import Symbolics
@@ -519,9 +519,14 @@ end
 
 function do_flow(P::Params, S::Stiffness, Xinit::Vector{Float64}, solver_params::SolverParams;
         do_plot::Bool=false, include_multipliers::Bool=false, record_movie::Bool=false, pause_after_init::Bool=false,
-        plot_each_iter::Int64=1, pause_after_plot::Bool=false)
+        plot_each_iter::Int64=1, pause_after_plot::Bool=false, snapshots_iters::Vector{Int}=Int[],
+        snapshots_times::Vector{Float64}=Float64[], output_dir::String="output")
 
     IP = compute_intermediate(P, S)
+
+    mkpath(output_dir)
+
+    plain_plot = !isempty(snapshots_iters)
 
     ρ_equi = P.M / P.L
     k_equi = P.L / 2π
@@ -530,7 +535,10 @@ function do_flow(P::Params, S::Stiffness, Xinit::Vector{Float64}, solver_params:
     Xx = copy(Xinit)
 
     if do_plot
-        fig, update_plot = init_plot(P, IP, S, Xx)
+        fig, update_plot = init_plot(P, IP, S, Xx; plain=plain_plot)
+        if length(snapshots_iters) + length(snapshots_times) > 0
+            M.save(joinpath(output_dir, "snapshot_0.pdf"), fig)
+        end
         if pause_after_init
             println("Hit enter to start.")
             readline()
@@ -544,6 +552,13 @@ function do_flow(P::Params, S::Stiffness, Xinit::Vector{Float64}, solver_params:
     done = [false]
 
     iter = 1:(solver_params.max_iter-1)
+
+    next_snapshot_time = Inf
+    next_snapshot_time_idx = -1
+    if length(snapshots_times) > 0
+        next_snapshot_time_idx = 1
+        next_snapshot_time = snapshots_times[next_snapshot_time_idx]
+    end
 
     function iter_flower(_i)
         res = flower()
@@ -583,10 +598,25 @@ function do_flow(P::Params, S::Stiffness, Xinit::Vector{Float64}, solver_params:
             end
             done[1] = true
         end
+
+        if n in snapshots_iters
+            M.save(joinpath(output_dir, "snapshot_iter_$(n)_t=$(res.t_i[n]).pdf"), fig)
+        end
+
+        if res.t_i[n] > next_snapshot_time
+            M.save(joinpath(output_dir, "snapshot_time_$(n)_t=$(res.t_i[n]).pdf"), fig)
+            if length(snapshots_times) > next_snapshot_time_idx
+                next_snapshot_time_idx += 1
+                next_snapshot_time = snapshots_times[next_snapshot_time_idx]
+            else
+                next_snapshot_time_idx = -1
+                next_snapshot_time = Inf
+            end
+        end
     end
 
     if record_movie
-        GLMakie.record(iter_flower, fig, "output.mp4", iter, framerate=10)
+        GLMakie.record(iter_flower, fig, joinpath(output_dir, "output.mp4"), iter, framerate=10)
     else
         while !done[1]
             iter_flower(1)
@@ -632,6 +662,58 @@ function initial_data_smooth(P::Params; sides::Int=1, smoothing::Float64, revers
     return [rhos; thetas; 0; 0; 0]
 end
 
+function initial_data_parametric(P::Params, p::Function, p_params::NamedTuple)
+    N = P.N
+
+    rho_amplitude = p_params.rho_amplitude
+    rho_phase = p_params.rho_phase
+
+    # oversample the curve
+    oversample_N = 100N
+    ts = collect(range(p_params.t_min, p_params.t_max, length=oversample_N + 1))[1:oversample_N]
+
+    p_parameterized = (φ) -> p(φ, p_params)
+
+    xy = permutedims(hcat(p_parameterized.(ts)...))
+
+    # resample to get evenly spaced nodes
+    # xy_even = EvenParam.reparam(xy; closed=true, new_N = N+1)[1:N,:]
+    xy_even = EvenParam.reparam(xy; closed=true, new_N = N)
+
+    # Recenter
+    xy_even = xy_even .- [xy_even[1,1] xy_even[1,2]]
+
+    # Rotate so that the first segment is parallel to the x axis
+    xy_even_c = xy_even[:,1] + xy_even[:,2]*im
+    alpha = angle(xy_even_c[2])
+    xy_even_c = xy_even_c.*exp.(-im*alpha)
+
+    # Compute tangential angles
+    xy_even_c = [real.(xy_even_c) imag.(xy_even_c)]
+    xy_diff = circshift(xy_even_c, -1) - xy_even_c
+    xy_angles = angle.(xy_diff[:,1]+xy_diff[:,2]*im)
+
+    thetas = zeros(N)
+    thetas[1] = xy_angles[1]
+    for i in 2:N
+        thetas[i] = thetas[i-1] + rem(xy_angles[i] - thetas[i-1], Float64(π), RoundNearest)
+    end
+
+    φs = range(0, 2π, N+1)[1:N]
+    rhos = vec(sqrt.(sum(abs2, xy_even; dims=2)))
+    extrema_rho = extrema(rhos)
+    p2p_rho = extrema_rho[2] - extrema_rho[1]
+    if p2p_rho > 1e-7
+        rhos .= (rhos .- extrema_rho[1])/p2p_rho*rho_amplitude
+    else
+        @warn "The provided function p has very low amplitude, not rescaling ρ"
+    end
+
+    rhos .-= (sum(rhos)/P.N - P.M/P.N)
+
+    return [rhos; thetas; 0; 0; 0]
+end
+
 function initial_data_polar(P::Params, r::Function, r_params::NamedTuple)
     N = P.N
 
@@ -640,7 +722,7 @@ function initial_data_polar(P::Params, r::Function, r_params::NamedTuple)
 
     # oversample the curve
     oversample_N = 100N
-    φs = collect(range(0, r_params.s_max, length=oversample_N + 1))[1:oversample_N]
+    φs = collect(range(r_params.s_min, r_params.s_max, length=oversample_N + 1))[1:oversample_N]
 
     r_parameterized = (φ) -> r(φ, r_params)
 
@@ -672,7 +754,8 @@ function initial_data_polar(P::Params, r::Function, r_params::NamedTuple)
     end
 
     φs = range(0, 2π, N+1)[1:N]
-    rhos = r_parameterized.(φs .+ rho_phase)
+    # rhos = r_parameterized.(φs .+ rho_phase)
+    rhos = cos.(2*(φs .+ rho_phase))
     extrema_rho = extrema(rhos)
     p2p_rho = extrema_rho[2] - extrema_rho[1]
     if p2p_rho > 1e-7
@@ -694,17 +777,19 @@ function eval_if_string(v)
     end
 end
 
-function initial_data_from_dict(P, d, r_func)
+function initial_data_from_dict(P, d, x_functions)
     d_params = d["parameters"][d["type"]]
 
-    if d["type"] == "star"
+    if d["type"] == "polar"
         # Convert Dict{String,Any} to NamedTuple
         r_params = NamedTuple{Tuple(Symbol.(keys(d_params)))}((values(d_params)))
-        @show r_params
-        return initial_data_polar(P, r_func, r_params)
+        return initial_data_polar(P, x_functions.r_func, r_params)
     elseif d["type"] == "polygon"
         kw = filter(x -> !(x[1] in [:type, :r_key]), collect(zip(map(Symbol, collect(keys(d_params))), values(d_params))))
         return initial_data_smooth(P; kw...)
+    elseif d["type"] == "parametric"
+        p_params = NamedTuple{Tuple(Symbol.(keys(d_params)))}((values(d_params)))
+        return initial_data_parametric(P, x_functions.p_func, p_params)
     else
         throw("Unknown initial data type")
     end
@@ -739,7 +824,8 @@ function parse_configuration(filename::String, function_defs::Dict)
     # Stiffness and initial data r(φ) functions
 
     local beta = function_defs[:beta][stiffness_key]
-    local r = function_defs[:r][get(T["initial_data"], "r_key", "default")]
+    local r_func = function_defs[:r][get(T["initial_data"], "r_key", "default")]
+    local p_func = function_defs[:p][get(T["initial_data"], "p_key", "default")]
 
     beta_expr = beta(x, stiffness_params)
     beta_prime_expr = Symbolics.derivative(beta_expr, x)
@@ -800,7 +886,7 @@ function parse_configuration(filename::String, function_defs::Dict)
     options = zip(map(Symbol, collect(keys(T["options"]))), values(T["options"]))
 
     # Initial condition
-    Xinit = initial_data_from_dict(P, T["initial_data"], r)
+    Xinit = initial_data_from_dict(P, T["initial_data"], (r_func=r_func, p_func=p_func))
 
     return P, S, Xinit, solver_params, options
 end
