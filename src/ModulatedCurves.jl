@@ -249,6 +249,9 @@ function build_flower(P::Params, IP::IntermediateParams, S::Stiffness,
     history = History(0, zeros(2*P.N+3))
 
     X = Base.copy(Xinit)
+    Xj_prev = Base.copy(Xinit)
+    Xj = Base.copy(Xinit)
+
     c = X2candidate(P, X)
     n = 1
     step_size = SP.step_size
@@ -280,25 +283,30 @@ function build_flower(P::Params, IP::IntermediateParams, S::Stiffness,
     function ()
         n += 1
 
-        residual = compute_residual(P, IP, S, matrices, X)
-        residual_norm = LA.norm(residual)
+        Xj_prev .= X
+        Xj .= X
 
-        # Assemble
-        A = assemble_inner_system(P, IP, S, matrices, X)
+        while true
+            residual = compute_residual(P, IP, S, matrices, Xj_prev, X, step_size)
+            @views residual[1:2P.N] -= (Xj_prev[1:2P.N] - X[1:2P.N])/step_size
 
-        # Solve
-        δX = (id_matrix .+ step_size*A)\(-step_size*residual)
+            # Assemble
+            A = assemble_inner_system(P, IP, S, matrices, Xj_prev)
 
-        if SP.adapt
-            Xnew, residual, step_size = adapt_step(P, IP, S, SP, matrices,
-                                                   X, δX,
-                                                   residual, step_size,
-                                                   history)
-            X .= Xnew
-        else
-            # Update
-            X += step_size*δX
-            residual = compute_residual(P, IP, S, matrices, X)
+            # Solve
+            δX = (id_matrix .+ step_size*A)\(-step_size*residual)
+
+            if SP.adapt
+                Xnew, residual, step_size = adapt_step(P, IP, S, SP, matrices,
+                                                       Xj, δX,
+                                                       residual, step_size,
+                                                       history)
+                Xj .= Xnew
+            else
+                # Update
+                Xj += step_size*δX
+                residual = compute_residual(P, IP, S, matrices, Xj) # the NEW residual
+            end
         end
 
         # Compute residual norm and energy
@@ -398,12 +406,12 @@ function assemble_inner_system(P::Params, IP::IntermediateParams, S::Stiffness,
 end
 
 function compute_residual(P::Params, IP::IntermediateParams, S::Stiffness,
-        matrices::FDMatrices, X::Vector{Float64})
+        matrices::FDMatrices, Xj_prev::Vector{Float64})
     N = P.N
     Δs = IP.Δs
 
     # Easier access to ρ, θ, λi
-    c = X2candidate(P, X)
+    c = X2candidate(P, Xj_prev)
 
     # Compute beta and derivatves
     beta_prime_ρ = S.beta_prime.(c.ρ)
@@ -416,7 +424,7 @@ function compute_residual(P::Params, IP::IntermediateParams, S::Stiffness,
     # Compute residuals for ρ
     b_E1 = P.µ * (matrices.D2 * c.ρ) - 0.5*beta_prime_ρ.*(compute_centered_fd_θ(P, matrices, c.θ) .- P.c0).^2 + c.λM*ones(N)
     if P.potential_range > 0
-        (_, w_prime, _) = compute_potential(P, X)
+        (_, w_prime, _) = compute_potential(P, Xj_prev)
         b_E1 -= w_prime
     end
 
@@ -426,6 +434,13 @@ function compute_residual(P::Params, IP::IntermediateParams, S::Stiffness,
     # Assemble with constraint residuals
     res = [b_E1; b_E2; Δs*sum(cos.(c.θ)); Δs*sum(sin.(c.θ)); Δs*sum(c.ρ) - P.M]
     return -res
+end
+
+function compute_residual(P::Params, IP::IntermediateParams, S::Stiffness,
+        matrices::FDMatrices, Xj_prev::Vector{Float64}, X::Vector{Float64}, step_size::Float64)
+    residual = compute_residual(P, IP, S, matrices, Xj_prev)
+    @views residual[1:2P.N] -= (Xj_prev[1:2P.N] - X[1:2P.N])/step_size
+    return residual
 end
 
 function compute_fd_θ(P::Params, matrices::FDMatrices, θ::Union{Vector{Float64}, SubA})
