@@ -40,6 +40,11 @@ end
     step_down_threshold::Float64  = 1e-1
     step_up_threshold::Float64    = 1e-3
     step_factor::Float64          = 1.4
+
+    newton_step_size::Float64     = 1.0
+    newton_max_iter::Int64        = 100
+
+    max_time::Float64
 end
 
 mutable struct Candidate
@@ -77,4 +82,7 @@ end
     D1c::SA.SparseMatrixCSC{Float64}
     D1c_rhs::Vector{Float64}
     D2::SA.SparseMatrixCSC{Float64}
+end
+
+struct MaxInterationReached <: Exception
 end

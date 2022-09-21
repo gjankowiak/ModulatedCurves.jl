@@ -3,15 +3,13 @@ module ModulatedCurves
 import Printf: @sprintf, @printf
 
 export Params, Stiffness, IntermediateParams, SolverParams
-export compute_intermediate, build_flower, assemble_fd_matrices, init_plot, do_flow
+export compute_intermediate, build_flower, assemble_fd_matrices, init_plot, do_flow, check_differential
 
 import LinearAlgebra
 const LA = LinearAlgebra
 
 import SparseArrays
 const SA = SparseArrays
-
-# import GLMakie
 
 import TOML
 import Symbolics
@@ -36,9 +34,9 @@ function compute_intermediate(P::Params, S::Stiffness)
     rho_eq = P.M / P.L
 
     return IntermediateParams(
-        Δs, rho_eq,
-        S.beta(rho_eq), S.beta_prime(rho_eq), S.beta_second(rho_eq)
-    )
+                              Δs, rho_eq,
+                              S.beta(rho_eq), S.beta_prime(rho_eq), S.beta_second(rho_eq)
+                             )
 end
 
 function prompt_yes_no(s::String, default_yes::Bool=false)
@@ -90,14 +88,14 @@ end
 """
 
 function adapt_step(P::Params, IP::IntermediateParams, S::Stiffness,
-                    SP::SolverParams, matrices::FDMatrices,
-                    X::Vector{Float64}, δX::Vector{Float64}, current_residual::Vector{Float64},
-                    current_step_size::Float64, history::History)
+        SP::SolverParams, matrices::FDMatrices,
+        X::Vector{Float64}, δX::Vector{Float64}, current_residual::Vector{Float64},
+        current_time_step::Float64, history::History)
 
     local energy, residual
 
     Xnew = zeros(size(X))
-    t = current_step_size
+    t = current_time_step
 
     check_step_up = false
     prev_t = -1
@@ -214,14 +212,14 @@ function minimizor(P::Params, IP::IntermediateParams, S::Stiffness,
         δX = A\-residual
 
         if SP.adapt
-            Xnew, residual, step_size = adapt_step(P, IP, S, SP, matrices,
+            Xnew, residual, time_step = adapt_step(P, IP, S, SP, matrices,
                                                    X, δX,
                                                    residual, step_size,
                                                    history)
             X .= Xnew
         else
             # Update
-            X += step_size*δX
+            X += time_step*δX
             residual = compute_residual(P, IP, S, matrices, X)
         end
 
@@ -252,11 +250,25 @@ function build_flower(P::Params, IP::IntermediateParams, S::Stiffness,
     Xj_prev = Base.copy(Xinit)
     Xj = Base.copy(Xinit)
 
+    δX = Base.copy(Xinit)
+
+    mm_term = zeros(size(X))
+
+    X_up = view(X, 1:2P.N)
+    Xj_up = view(Xj, 1:2P.N)
+    mm_term_up = view(mm_term, 1:2P.N)
+
     c = X2candidate(P, X)
     n = 1
-    step_size = SP.step_size
+
+    time_step_size = SP.step_size
+    newton_step_size = SP.newton_step_size
+    @show newton_step_size
 
     residual = compute_residual(P, IP, S, matrices, X)
+    residual_prev = Base.copy(residual)
+
+    residual_norm = 1.0
 
     eρ, eθ = compute_energy_split(P, IP, S, matrices, X)
     energy_i, energy_ρ_i, energy_θ_i = [eρ + eθ], [eρ], [eθ]
@@ -275,75 +287,113 @@ function build_flower(P::Params, IP::IntermediateParams, S::Stiffness,
         end
     end
 
-    # X_prev = Base.copy(X)
-
     iter_stationary_res = 0
 
     # Loop until tolerance or max. iterations is met
     function ()
-        n += 1
 
         Xj_prev .= X
         Xj .= X
 
+        newton_n = 0
+
         while true
-            residual = compute_residual(P, IP, S, matrices, Xj_prev, X, step_size)
-            @views residual[1:2P.N] -= (Xj_prev[1:2P.N] - X[1:2P.N])/step_size
+            newton_n += 1
+            # print(".")
+            residual .= compute_residual(P, IP, S, matrices, Xj)
 
             # Assemble
-            A = assemble_inner_system(P, IP, S, matrices, Xj_prev)
+            A = assemble_inner_system(P, IP, S, matrices, Xj)
+            A_max = maximum(abs.(A))
 
             # Solve
-            δX = (id_matrix .+ step_size*A)\(-step_size*residual)
+            @. mm_term_up = X_up - Xj_up
+            δX .= (id_matrix .+ time_step_size*A)\(-time_step_size*residual + mm_term)
 
-            if SP.adapt
-                Xnew, residual, step_size = adapt_step(P, IP, S, SP, matrices,
-                                                       Xj, δX,
-                                                       residual, step_size,
-                                                       history)
-                Xj .= Xnew
+            # if SP.adapt
+            #     Xnew, residual, newton_step_size = adapt_step(P, IP, S, SP, matrices,
+            #                                            Xj, δX,
+            #                                            residual, newton_step_size,
+            #                                            history)
+            #     Xj .= Xnew
+            # else
+            #     # Update
+            #     Xj += newton_step_size*δX
+            #     residual = compute_residual(P, IP, S, matrices, Xj) # the NEW residual
+            # end
+
+            Xj_prev .= Xj
+
+            @. Xj += newton_step_size*δX
+            residual .= compute_residual(P, IP, S, matrices, Xj, X, time_step_size) # the NEW residual
+
+            # Compute residual norm and energy
+            residual_norm = LA.norm(residual)
+            eρ, eθ = compute_energy_split(P, IP, S, matrices, Xj)
+
+            residual_relative = LA.norm(residual - residual_prev)/residual_norm
+            if newton_n % 10 == 0
+                print(@sprintf("%s    [%d] Residual: %.5e/%.5e, energy: %.5e, |A|∞ = %.5e", "\b"^100, newton_n, residual_norm, residual_relative, eρ+eθ, A_max))
+                # println(@sprintf("%s    [%d] Residual: %.5e/%.5e, energy: %.5e, |A|∞ = %.5e", "", newton_n, residual_norm, residual_relative, eρ+eθ, A_max))
+            end
+
+            if residual_relative < SP.rtol
+                @show LA.norm(residual - residual_prev)
+                iter_stationary_res += 1
             else
-                # Update
-                Xj += step_size*δX
-                residual = compute_residual(P, IP, S, matrices, Xj) # the NEW residual
+                iter_stationary_res = 0
+            end
+
+            residual_prev .= residual
+
+            converged = (iter_stationary_res > 10) || (LA.norm(residual)/P.N < SP.atol)
+            if converged
+                # @show iter_stationary_res
+                # println()
+
+                println()
+                if newton_n < 10
+                    print(@sprintf("%s[%d] t=%f", "\b"^100, n, t_i[end] + time_step_size))
+                else
+                    @info "Newton converged after $newton_n iterations"
+                end
+                break
+            end
+
+            if newton_n > SP.newton_max_iter
+                println()
+                throw(MaxInterationReached())
             end
         end
 
-        # Compute residual norm and energy
-        residual_norm = LA.norm(residual)
+        n += 1
+
+        # X += time_step_size*Xj
+        X .= Xj
+
         eρ, eθ = compute_energy_split(P, IP, S, matrices, X)
         energy = eρ + eθ
         push!(energy_i, energy)
         push!(energy_ρ_i, eρ)
         push!(energy_θ_i, eθ)
+
+        residual_norm = LA.norm(residual)
         push!(residual_norm_i, residual_norm)
 
-        push!(t_i, t_i[end] + step_size)
+        push!(t_i, t_i[end] + time_step_size)
         push!(int_θ_i, sum(c.θ)*IP.Δs)
-
-        if (LA.norm(residual - history.residual_prev)/LA.norm(residual)) < SP.rtol
-            @show LA.norm(residual - history.residual_prev)
-            iter_stationary_res += 1
-        else
-            iter_stationary_res = 0
-        end
-
-        converged = (iter_stationary_res > 100) || (LA.norm(residual) < SP.atol)
-        if converged
-            @show iter_stationary_res
-        end
 
         history.energy_prev = energy
         history.residual_prev = residual
 
-        res = Result(X, n, energy_i, energy_ρ_i, energy_θ_i, residual_norm_i, t_i, int_θ_i, converged, converged || (n>=SP.max_iter))
+        res = Result(X, n, energy_i, energy_ρ_i, energy_θ_i, residual_norm_i, t_i, int_θ_i, false, n>=SP.max_iter)
 
         return res
     end
 end
 
 function compute_energy_split(P::Params, IP::IntermediateParams, S::Stiffness,
-                              matrices::FDMatrices, X::Vector{Float64})
+        matrices::FDMatrices, X::Vector{Float64})
     c = X2candidate(P, X)
     ρ_dot = (circshift(c.ρ, -1) - c.ρ)/IP.Δs
     θ_dot = compute_centered_fd_θ(P, matrices, c.θ)
@@ -437,9 +487,9 @@ function compute_residual(P::Params, IP::IntermediateParams, S::Stiffness,
 end
 
 function compute_residual(P::Params, IP::IntermediateParams, S::Stiffness,
-        matrices::FDMatrices, Xj_prev::Vector{Float64}, X::Vector{Float64}, step_size::Float64)
+        matrices::FDMatrices, Xj_prev::Vector{Float64}, X::Vector{Float64}, time_step::Float64)
     residual = compute_residual(P, IP, S, matrices, Xj_prev)
-    @views residual[1:2P.N] -= (Xj_prev[1:2P.N] - X[1:2P.N])/step_size
+    @views residual[1:2P.N] += (Xj_prev[1:2P.N] - X[1:2P.N])/time_step
     return residual
 end
 
@@ -470,8 +520,8 @@ function assemble_fd_matrices(P::Params, IP::IntermediateParams; winding_number:
                    # compute_fd_θ function
                    (SA.spdiagm( -N  =>  ones(1),
                                -1   => -ones(N),
-                                0   =>  ones(N+1),
-                                N-1 => -ones(2))[1:N+1,1:N])/Δs,
+                               0   =>  ones(N+1),
+                               N-1 => -ones(2))[1:N+1,1:N])/Δs,
 
                    # Affine term for up/downstream finite differences
                    [w*2π/Δs; zeros(N-1); w*2π/Δs],
@@ -479,7 +529,7 @@ function assemble_fd_matrices(P::Params, IP::IntermediateParams; winding_number:
                    # Matrix for centered finite differences
                    (SA.spdiagm(1-N =>  ones(1),
                                -1  => -ones(N-1),
-                                1  =>  ones(N-1),
+                               1  =>  ones(N-1),
                                N-1 => -ones(1)))*0.5/Δs,
 
                    # Affine term for centered finite differences
@@ -541,7 +591,7 @@ function do_flow(P::Params, S::Stiffness, Xinit::Vector{Float64}, solver_params:
 
     mkpath(output_dir)
 
-    plain_plot = !isempty(snapshots_iters)
+    plain_plot = !isempty(snapshots_iters) || !isempty(snapshots_times)
 
     ρ_equi = P.M / P.L
     k_equi = P.L / 2π
@@ -552,7 +602,9 @@ function do_flow(P::Params, S::Stiffness, Xinit::Vector{Float64}, solver_params:
     if do_plot
         fig, update_plot = init_plot(P, IP, S, Xx; plain=plain_plot)
         if length(snapshots_iters) + length(snapshots_times) > 0
-            M.save(joinpath(output_dir, "snapshot_0.pdf"), fig)
+            save_path = joinpath(output_dir, "snapshot_0.pdf")
+            @info "Saving initial snapshot under $save_path"
+            M.save(save_path, fig)
         end
         if pause_after_init
             println("Hit enter to start.")
@@ -615,11 +667,15 @@ function do_flow(P::Params, S::Stiffness, Xinit::Vector{Float64}, solver_params:
         end
 
         if n in snapshots_iters
-            M.save(joinpath(output_dir, "snapshot_iter_$(n)_t=$(res.t_i[n]).pdf"), fig)
+            save_path = joinpath(output_dir, "snapshot_iter_$(n)_t=$(res.t_i[n]).pdf")
+            @info "Saving snapshot under $save_path"
+            M.save(save_path, fig)
         end
 
         if res.t_i[n] > next_snapshot_time
-            M.save(joinpath(output_dir, "snapshot_time_$(n)_t=$(res.t_i[n]).pdf"), fig)
+            save_path = joinpath(output_dir, "snapshot_time_$(n)_t=$(res.t_i[n]).pdf")
+            @info "Saving snapshot under $save_path"
+            M.save(save_path, fig)
             if length(snapshots_times) > next_snapshot_time_idx
                 next_snapshot_time_idx += 1
                 next_snapshot_time = snapshots_times[next_snapshot_time_idx]
@@ -640,7 +696,7 @@ function do_flow(P::Params, S::Stiffness, Xinit::Vector{Float64}, solver_params:
 end
 
 function initial_data_smooth(P::Params; sides::Int=1, smoothing::Float64, reverse_phase::Bool=false, only_rho::Bool=false,
-    rho_amplitude::Float64=1.0, rho_phase::Float64=0.0, rho_wave_number::Int64=0)
+        rho_amplitude::Float64=1.0, rho_phase::Float64=0.0, rho_wave_number::Int64=0)
     if P.N % sides != 0
         error("N must be dividible by the number of sides")
     end

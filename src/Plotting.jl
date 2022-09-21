@@ -43,7 +43,7 @@ function init_plot(P::Params, IP::IntermediateParams, S::Stiffness, X::Vector{Fl
     M.hidespines!(axes[1, 1])
 
     w_plus = max(1,w)
-    M.limits!(axes[1,1], -1, 1, -1, 1)
+    M.limits!(axes[1,1], -2, 2, -2, 2)
     # M.limits!(axes[1,1], -1.5/w_plus, 1.5/w_plus, -1.5/w_plus, 1.5/w_plus)
 
     if !plain
