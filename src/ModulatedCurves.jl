@@ -11,6 +11,8 @@ const LA = LinearAlgebra
 import SparseArrays
 const SA = SparseArrays
 
+import HDF5
+
 import TOML
 import Symbolics
 
@@ -240,7 +242,9 @@ function minimizor(P::Params, IP::IntermediateParams, S::Stiffness,
 end
 
 function build_flower(P::Params, IP::IntermediateParams, S::Stiffness,
-        Xinit::Vector{Float64}, SP::SolverParams=SolverParams(); include_multipliers::Bool=false)
+        Xinit::Vector{Float64}, SP::SolverParams=SolverParams(); include_multipliers::Bool=false,
+        energy_circle::Float64=0.0)
+
     matrices = assemble_fd_matrices(P, IP; winding_number=compute_winding_number(P, Xinit))
 
     # Initialization
@@ -263,7 +267,6 @@ function build_flower(P::Params, IP::IntermediateParams, S::Stiffness,
 
     time_step_size = SP.step_size
     newton_step_size = SP.newton_step_size
-    @show newton_step_size
 
     residual = compute_residual(P, IP, S, matrices, X)
     residual_prev = Base.copy(residual)
@@ -271,11 +274,15 @@ function build_flower(P::Params, IP::IntermediateParams, S::Stiffness,
     residual_norm = 1.0
 
     eρ, eθ = compute_energy_split(P, IP, S, matrices, X)
-    energy_i, energy_ρ_i, energy_θ_i = [eρ + eθ], [eρ], [eθ]
+    energy_i = zeros(1+SP.max_iter)
+    energy_ρ_i = zeros(1+SP.max_iter)
+    energy_θ_i = zeros(1+SP.max_iter)
+
+    energy_i[1], energy_ρ_i[1], energy_θ_i[1] = eρ + eθ, eρ, eθ
 
     residual_norm_i = [LA.norm(residual)]
     int_θ_i = [sum(c.θ)*IP.Δs]
-    t_i = [0.0]
+    t_i = zeros(1+SP.max_iter)
 
     history.energy_prev = energy_i[1]
     history.residual_prev .= residual
@@ -287,18 +294,18 @@ function build_flower(P::Params, IP::IntermediateParams, S::Stiffness,
         end
     end
 
-    iter_stationary_res = 0
 
     # Loop until tolerance or max. iterations is met
-    function ()
+    function _f()
 
         Xj_prev .= X
         Xj .= X
 
-        newton_n = 0
+        n_newton = 0
+        iter_stationary_res = 0
 
         while true
-            newton_n += 1
+            n_newton += 1
             # print(".")
             residual .= compute_residual(P, IP, S, matrices, Xj)
 
@@ -332,10 +339,13 @@ function build_flower(P::Params, IP::IntermediateParams, S::Stiffness,
             eρ, eθ = compute_energy_split(P, IP, S, matrices, Xj)
 
             residual_relative = LA.norm(residual - residual_prev)/residual_norm
-            if newton_n % 10 == 0
-                print(@sprintf("%s    [%d] Residual: %.5e/%.5e, energy: %.5e, |A|∞ = %.5e", "\b"^100, newton_n, residual_norm, residual_relative, eρ+eθ, A_max))
-                # println(@sprintf("%s    [%d] Residual: %.5e/%.5e, energy: %.5e, |A|∞ = %.5e", "", newton_n, residual_norm, residual_relative, eρ+eθ, A_max))
-            end
+            # if n_newton % 10 == 0
+            #     if n_newton == 10
+            #         println()
+            #     end
+            #     print(@sprintf("%s    [%d] Residual: %.5e/%.5e, energy: %.5e, |A|∞ = %.5e", "\b"^100, n_newton, residual_norm, residual_relative, eρ+eθ, A_max))
+            #     # println(@sprintf("%s    [%d] Residual: %.5e/%.5e, energy: %.5e, |A|∞ = %.5e", "", n_newton, residual_norm, residual_relative, eρ+eθ, A_max))
+            # end
 
             if residual_relative < SP.rtol
                 @show LA.norm(residual - residual_prev)
@@ -351,45 +361,46 @@ function build_flower(P::Params, IP::IntermediateParams, S::Stiffness,
                 # @show iter_stationary_res
                 # println()
 
-                println()
-                if newton_n < 10
-                    print(@sprintf("%s[%d] t=%f", "\b"^100, n, t_i[end] + time_step_size))
-                else
-                    @info "Newton converged after $newton_n iterations"
+                if n_newton > 10
+                    println()
                 end
+                print(@sprintf("%s[%d/%d] t=%f, Eµ: %.5e/%.5e, ", "\b"^100, n, n_newton, t_i[max(1,n-1)] + time_step_size, eρ+eθ, eρ+eθ-energy_circle))
                 break
             end
 
-            if newton_n > SP.newton_max_iter
+            if n_newton > SP.newton_max_iter
                 println()
                 throw(MaxInterationReached())
             end
         end
 
-        n += 1
 
         # X += time_step_size*Xj
         X .= Xj
 
+        n += 1
+
         eρ, eθ = compute_energy_split(P, IP, S, matrices, X)
         energy = eρ + eθ
-        push!(energy_i, energy)
-        push!(energy_ρ_i, eρ)
-        push!(energy_θ_i, eθ)
+        energy_i[n] = energy
+        energy_ρ_i[n] = eρ
+        energy_θ_i[n] = eθ
+
+        t_i[n] = t_i[n-1] + time_step_size
 
         residual_norm = LA.norm(residual)
         push!(residual_norm_i, residual_norm)
 
-        push!(t_i, t_i[end] + time_step_size)
         push!(int_θ_i, sum(c.θ)*IP.Δs)
 
         history.energy_prev = energy
         history.residual_prev = residual
 
-        res = Result(X, n, energy_i, energy_ρ_i, energy_θ_i, residual_norm_i, t_i, int_θ_i, false, n>=SP.max_iter)
+        res = Result(X, n, energy_i, energy_ρ_i, energy_θ_i, residual_norm_i, t_i, int_θ_i, false, n>=SP.max_iter || t_i[n] >= SP.max_time)
 
         return res
     end
+    return _f, matrices
 end
 
 function compute_energy_split(P::Params, IP::IntermediateParams, S::Stiffness,
@@ -582,10 +593,70 @@ function linreg(xi, fi)
     return (a, b)
 end
 
+function save_snapshot(h5_fn::String, P::Params, next_snapshot_idx::Int64, X::Vector{Float64}, t::Float64, n::Int64, energy_ρ::Float64, energy_θ::Float64)
+    @info "Saving iteration $n"
+    h5 = HDF5.h5open(h5_fn, "r+")
+
+    HDF5.create_dataset(h5, "s$(next_snapshot_idx)X", Float64, (2P.N+3,))
+    write(h5["s$(next_snapshot_idx)X"], X)
+
+    HDF5.create_dataset(h5, "s$(next_snapshot_idx)n", Int64)
+    write(h5["s$(next_snapshot_idx)n"], n)
+
+    HDF5.create_dataset(h5, "s$(next_snapshot_idx)t", Float64)
+    write(h5["s$(next_snapshot_idx)t"], t)
+
+    HDF5.create_dataset(h5, "s$(next_snapshot_idx)energy_rho", Float64)
+    write(h5["s$(next_snapshot_idx)energy_rho"], energy_ρ)
+
+    HDF5.create_dataset(h5, "s$(next_snapshot_idx)energy_theta", Float64)
+    write(h5["s$(next_snapshot_idx)energy_theta"], energy_θ)
+
+    write(h5["s_last_idx"], next_snapshot_idx)
+
+    close(h5)
+end
+
+function save_snapshot(h5_fn::String, P::Params, next_snapshot_idx::Int64, res::Result; n_last::Int64=0)
+    n = res.iter
+    @info "Saving iteration $n"
+
+    h5 = HDF5.h5open(h5_fn, "r+")
+    HDF5.create_dataset(h5, "s$(next_snapshot_idx)X", Float64, (2P.N+3,))
+    write(h5["s$(next_snapshot_idx)X"], res.sol)
+
+    HDF5.create_dataset(h5, "s$(next_snapshot_idx)n", Int64)
+    write(h5["s$(next_snapshot_idx)n"], n)
+
+    HDF5.create_dataset(h5, "s$(next_snapshot_idx)t", Float64)
+    write(h5["s$(next_snapshot_idx)t"], res.t_i[n])
+
+    HDF5.create_dataset(h5, "s$(next_snapshot_idx)energy_rho", Float64)
+    write(h5["s$(next_snapshot_idx)energy_rho"], res.energy_ρ_i[n])
+
+    HDF5.create_dataset(h5, "s$(next_snapshot_idx)energy_theta", Float64)
+    write(h5["s$(next_snapshot_idx)energy_theta"], res.energy_θ_i[n])
+
+    write(h5["s_last_idx"], next_snapshot_idx)
+
+    write(h5["energy_rho"], res.energy_ρ_i)
+    write(h5["energy_theta"], res.energy_θ_i)
+    write(h5["t"], res.t_i)
+    # h5["energy_rho"] = res.energy_ρ_i
+    # h5["energy_theta"] = res.energy_θ_i
+
+    if n_last > 0
+        HDF5.create_dataset(h5, "n_last", Int64)
+        write(h5["n_last"], res.iter)
+    end
+
+    close(h5)
+end
+
 function do_flow(P::Params, S::Stiffness, Xinit::Vector{Float64}, solver_params::SolverParams;
         do_plot::Bool=false, include_multipliers::Bool=false, record_movie::Bool=false, pause_after_init::Bool=false,
         plot_each_iter::Int64=1, pause_after_plot::Bool=false, snapshots_iters::Vector{Int}=Int[],
-        snapshots_times::Vector{Float64}=Float64[], output_dir::String="output")
+        snapshots_times::Vector{Float64}=Float64[], output_dir::String="output", kwargs...)
 
     IP = compute_intermediate(P, S)
 
@@ -598,6 +669,25 @@ function do_flow(P::Params, S::Stiffness, Xinit::Vector{Float64}, solver_params:
     energy_circle = P.L * S.beta(ρ_equi) * (k_equi - P.c0)^2 / 2
 
     Xx = copy(Xinit)
+    flower, matrices = build_flower(P, IP, S, Xx, solver_params; include_multipliers=include_multipliers, energy_circle=energy_circle)
+
+    eρ, eθ = compute_energy_split(P, IP, S, matrices, Xinit)
+
+    h5_fn = joinpath(output_dir, "data.hdf5")
+    HDF5.h5open(h5_fn, "w") do h5
+        h5["rho_equi"] = ρ_equi
+        h5["k_equi"] = k_equi
+        h5["energy_circle"] = energy_circle
+
+        HDF5.create_dataset(h5, "s_last_idx", Int64)
+
+        HDF5.create_dataset(h5, "energy_rho",   Float64, (1+solver_params.max_iter,))
+        HDF5.create_dataset(h5, "energy_theta", Float64, (1+solver_params.max_iter,))
+        HDF5.create_dataset(h5, "t", Float64, (1+solver_params.max_iter,))
+    end
+
+    save_snapshot(h5_fn, P, 0, Xinit, 0.0, 0, eρ, eθ)
+    next_snapshot_idx = 1
 
     if do_plot
         fig, update_plot = init_plot(P, IP, S, Xx; plain=plain_plot)
@@ -612,7 +702,6 @@ function do_flow(P::Params, S::Stiffness, Xinit::Vector{Float64}, solver_params:
         end
     end
 
-    flower = build_flower(P, IP, S, Xx, solver_params; include_multipliers=include_multipliers)
 
     local res
 
@@ -658,30 +747,36 @@ function do_flow(P::Params, S::Stiffness, Xinit::Vector{Float64}, solver_params:
         if res.finished || res.residual_norm_i[n] > 1e10
             print("Finished, converged: ")
             println(res.converged)
-            @show res.residual_norm_i[end]
-            @show extrema(res.int_θ_i)
             if do_plot
                 update_plot(res.sol, (@sprintf "%d, energy/rel: %.4f/%.4f" n res.energy_i[n]  (res.energy_i[n] - energy_circle)), res)
             end
             done[1] = true
-        end
 
-        if n in snapshots_iters
-            save_path = joinpath(output_dir, "snapshot_iter_$(n)_t=$(res.t_i[n]).pdf")
-            @info "Saving snapshot under $save_path"
-            M.save(save_path, fig)
-        end
+            save_snapshot(h5_fn, P, next_snapshot_idx, res; n_last=res.iter)
+        else
+            if n in snapshots_iters
+                save_path = joinpath(output_dir, "snapshot_iter_$(n)_t=$(res.t_i[n]).pdf")
+                println()
+                @info "Saving snapshot under $save_path"
+                M.save(save_path, fig)
+                save_snapshot(h5_fn, P, next_snapshot_idx, res)
+                next_snapshot_idx += 1
+            end
 
-        if res.t_i[n] > next_snapshot_time
-            save_path = joinpath(output_dir, "snapshot_time_$(n)_t=$(res.t_i[n]).pdf")
-            @info "Saving snapshot under $save_path"
-            M.save(save_path, fig)
-            if length(snapshots_times) > next_snapshot_time_idx
-                next_snapshot_time_idx += 1
-                next_snapshot_time = snapshots_times[next_snapshot_time_idx]
-            else
-                next_snapshot_time_idx = -1
-                next_snapshot_time = Inf
+            if res.t_i[n] > next_snapshot_time
+                save_path = joinpath(output_dir, "snapshot_time_$(n)_t=$(res.t_i[n]).pdf")
+                println()
+                @info "Saving snapshot under $save_path"
+                M.save(save_path, fig)
+                save_snapshot(h5_fn, P, next_snapshot_idx, res)
+                next_snapshot_idx += 1
+                if length(snapshots_times) > next_snapshot_time_idx
+                    next_snapshot_time_idx += 1
+                    next_snapshot_time = snapshots_times[next_snapshot_time_idx]
+                else
+                    next_snapshot_time_idx = -1
+                    next_snapshot_time = Inf
+                end
             end
         end
     end
