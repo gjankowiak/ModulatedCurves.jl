@@ -10,7 +10,8 @@ function isconstant(v::Vector{Float64}, tol::Float64=1e-10)
     return M - m < tol
 end
 
-function init_plot(P::Params, IP::IntermediateParams, S::Stiffness, X::Vector{Float64}; label::String="", plain::Bool=false)
+function init_plot(P::Params, IP::IntermediateParams, S::Stiffness, X::Vector{Float64}; label::String="", plain::Bool=false,
+                   rho_factor::Float64=100.0)
 
     w = compute_winding_number(P, X)
 
@@ -168,7 +169,7 @@ function init_plot(P::Params, IP::IntermediateParams, S::Stiffness, X::Vector{Fl
 
     # M.lines!(axes[1,1], cos.(t), sin.(t), lw=0.5, color="gray")
     M.scatterlines!(axes[1,1], M.lift(x -> x[:,1], xy_node), M.lift(x -> x[:,2], xy_node),
-                    markersize=M.lift(x -> 100*abs.([x.ρ; x.ρ[1]]), c_node),
+                    markersize=M.lift(x -> rho_factor*abs.([x.ρ; x.ρ[1]]), c_node),
                     markercolor=colors)
     M.lines!(axes[1,1], M.lift(x -> x[:,1], xy_node), M.lift(x -> x[:,2], xy_node), color="black", linewidth=0.3)
                     # markercolor=M.lift(x -> map(v -> v>0 ? "blue" : "red", [x.ρ; x.ρ[1]]), )
