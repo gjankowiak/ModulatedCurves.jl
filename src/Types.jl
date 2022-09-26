@@ -44,6 +44,8 @@ end
     newton_step_size::Float64     = 1.0
     newton_max_iter::Int64        = 100
 
+    abs_time_tol::Float64         = 1e-13
+
     max_time::Float64
 end
 
@@ -84,5 +86,5 @@ end
     D2::SA.SparseMatrixCSC{Float64}
 end
 
-struct MaxInterationReached <: Exception
-end
+struct MaxInterationReached <: Exception end
+struct TimeStepTooSmall <: Exception end

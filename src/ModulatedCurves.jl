@@ -317,18 +317,6 @@ function build_flower(P::Params, IP::IntermediateParams, S::Stiffness,
             @. mm_term_up = X_up - Xj_up
             δX .= (id_matrix .+ time_step_size*A)\(-time_step_size*residual + mm_term)
 
-            # if SP.adapt
-            #     Xnew, residual, newton_step_size = adapt_step(P, IP, S, SP, matrices,
-            #                                            Xj, δX,
-            #                                            residual, newton_step_size,
-            #                                            history)
-            #     Xj .= Xnew
-            # else
-            #     # Update
-            #     Xj += newton_step_size*δX
-            #     residual = compute_residual(P, IP, S, matrices, Xj) # the NEW residual
-            # end
-
             Xj_prev .= Xj
 
             @. Xj += newton_step_size*δX
@@ -339,13 +327,6 @@ function build_flower(P::Params, IP::IntermediateParams, S::Stiffness,
             eρ, eθ = compute_energy_split(P, IP, S, matrices, Xj)
 
             residual_relative = LA.norm(residual - residual_prev)/residual_norm
-            # if n_newton % 10 == 0
-            #     if n_newton == 10
-            #         println()
-            #     end
-            #     print(@sprintf("%s    [%d] Residual: %.5e/%.5e, energy: %.5e, |A|∞ = %.5e", "\b"^100, n_newton, residual_norm, residual_relative, eρ+eθ, A_max))
-            #     # println(@sprintf("%s    [%d] Residual: %.5e/%.5e, energy: %.5e, |A|∞ = %.5e", "", n_newton, residual_norm, residual_relative, eρ+eθ, A_max))
-            # end
 
             if residual_relative < SP.rtol
                 @show LA.norm(residual - residual_prev)
@@ -355,16 +336,44 @@ function build_flower(P::Params, IP::IntermediateParams, S::Stiffness,
             end
 
             residual_prev .= residual
+            @views step_norm = LA.norm(Xj[1:2P.N] - X[1:2P.N], Inf)
 
             converged = (iter_stationary_res > 10) || (LA.norm(residual)/P.N < SP.atol)
-            if converged
-                # @show iter_stationary_res
-                # println()
 
-                if n_newton > 10
-                    println()
+            if converged
+
+                # adapt
+                if SP.adapt
+                    if step_norm < SP.step_up_threshold
+                        if time_step_size < SP.max_step_size
+                            time_step_size = min(SP.max_step_size, time_step_size*SP.step_factor)
+                            println()
+                            println(@sprintf("|X-Xprev| = %.5e, time step ↑ (%f)", step_norm, time_step_size))
+                            Xj_prev .= X
+                            Xj .= X
+
+                            n_newton = 0
+                            iter_stationary_res = 0
+                            continue
+                        end
+                    elseif step_norm > SP.step_down_threshold
+                        if time_step_size == SP.min_step_size
+                            throw(TimeStepTooSmall())
+                        end
+                        time_step_size = max(SP.min_step_size, time_step_size/SP.step_factor)
+                        println()
+                        println(@sprintf("|X-Xprev| = %.5e, time step ↓ (%f)", step_norm, time_step_size))
+                        Xj_prev .= X
+                        Xj .= X
+
+                        n_newton = 0
+                        iter_stationary_res = 0
+                        continue
+                    end
                 end
-                print(@sprintf("%s[%d/%d] t=%f, Eµ: %.5e/%.5e, ", "\b"^100, n, n_newton, t_i[max(1,n-1)] + time_step_size, eρ+eθ, eρ+eθ-energy_circle))
+
+
+                print(@sprintf("%s[%d/%d] t=%f, Eµ: %.5e/%.5e, |X-Xprev|: %.5e", "\b"^1000, n, n_newton, t_i[max(1,n-1)] + time_step_size, eρ+eθ, eρ+eθ-energy_circle, step_norm))
                 break
             end
 
@@ -374,8 +383,8 @@ function build_flower(P::Params, IP::IntermediateParams, S::Stiffness,
             end
         end
 
-
         # X += time_step_size*Xj
+        step_norm = LA.norm(X - Xj, Inf)
         X .= Xj
 
         n += 1
@@ -396,7 +405,7 @@ function build_flower(P::Params, IP::IntermediateParams, S::Stiffness,
         history.energy_prev = energy
         history.residual_prev = residual
 
-        res = Result(X, n, energy_i, energy_ρ_i, energy_θ_i, residual_norm_i, t_i, int_θ_i, false, n>=SP.max_iter || t_i[n] >= SP.max_time)
+        res = Result(X, n, energy_i, energy_ρ_i, energy_θ_i, residual_norm_i, t_i, int_θ_i, step_norm < SP.abs_time_tol, n>=SP.max_iter || t_i[n] >= SP.max_time || step_norm < 1e-12)
 
         return res
     end
@@ -664,11 +673,23 @@ function do_flow(P::Params, S::Stiffness, Xinit::Vector{Float64}, solver_params:
 
     plain_plot = !isempty(snapshots_iters) || !isempty(snapshots_times)
 
+    wn = compute_winding_number(P, Xinit)
+
     ρ_equi = P.M / P.L
-    k_equi = P.L / 2π
-    energy_circle = P.L * S.beta(ρ_equi) * (k_equi - P.c0)^2 / 2
+
+    if wn != 0
+        k_equi = P.L / (wn*2π)
+        energy_circle = P.L * S.beta(ρ_equi) * (k_equi - P.c0)^2 / 2
+    else
+        k_equi = 0.0
+        energy_circle = 0.0
+    end
+
+
 
     Xx = copy(Xinit)
+    Xx_prev = copy(Xinit)
+
     flower, matrices = build_flower(P, IP, S, Xx, solver_params; include_multipliers=include_multipliers, energy_circle=energy_circle)
 
     eρ, eθ = compute_energy_split(P, IP, S, matrices, Xinit)
@@ -692,7 +713,7 @@ function do_flow(P::Params, S::Stiffness, Xinit::Vector{Float64}, solver_params:
     if do_plot
         fig, update_plot = init_plot(P, IP, S, Xx; plain=plain_plot)
         if length(snapshots_iters) + length(snapshots_times) > 0
-            save_path = joinpath(output_dir, "snapshot_0.pdf")
+            save_path = joinpath(output_dir, "snapshots", "0.pdf")
             @info "Saving initial snapshot under $save_path"
             M.save(save_path, fig)
         end
@@ -744,18 +765,25 @@ function do_flow(P::Params, S::Stiffness, Xinit::Vector{Float64}, solver_params:
             # print(".")
         end
 
-        if res.finished || res.residual_norm_i[n] > 1e10
+        step_norm = LA.norm(Xx - Xx_prev, Inf)
+        Xx_prev .= Xx
+
+        if res.finished || res.residual_norm_i[n] > 1e10 || (step_norm < solver_params.abs_time_tol)
+            println()
             print("Finished, converged: ")
             println(res.converged)
             if do_plot
                 update_plot(res.sol, (@sprintf "%d, energy/rel: %.4f/%.4f" n res.energy_i[n]  (res.energy_i[n] - energy_circle)), res)
+                save_path = joinpath(output_dir, "snapshots", "last.pdf")
+                @info "Saving final snapshot under $save_path"
+                M.save(save_path, fig)
             end
             done[1] = true
 
             save_snapshot(h5_fn, P, next_snapshot_idx, res; n_last=res.iter)
         else
             if n in snapshots_iters
-                save_path = joinpath(output_dir, "snapshot_iter_$(n)_t=$(res.t_i[n]).pdf")
+                save_path = joinpath(output_dir, "snapshots", "iter_$(n)_t=$(res.t_i[n]).pdf")
                 println()
                 @info "Saving snapshot under $save_path"
                 M.save(save_path, fig)
@@ -764,7 +792,7 @@ function do_flow(P::Params, S::Stiffness, Xinit::Vector{Float64}, solver_params:
             end
 
             if res.t_i[n] > next_snapshot_time
-                save_path = joinpath(output_dir, "snapshot_time_$(n)_t=$(res.t_i[n]).pdf")
+                save_path = joinpath(output_dir, "snapshots", "time_$(n)_t=$(res.t_i[n]).pdf")
                 println()
                 @info "Saving snapshot under $save_path"
                 M.save(save_path, fig)
