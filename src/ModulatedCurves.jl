@@ -4,6 +4,8 @@ import Printf: @sprintf, @printf
 
 export Params, Stiffness, IntermediateParams, SolverParams
 export compute_intermediate, build_flower, assemble_fd_matrices, init_plot, do_flow, check_differential
+export M
+export params_from_toml, _compute_intermediate
 
 import LinearAlgebra
 const LA = LinearAlgebra
@@ -12,6 +14,8 @@ import SparseArrays
 const SA = SparseArrays
 
 import HDF5
+
+import Serialization
 
 import TOML
 import Symbolics
@@ -29,6 +33,16 @@ function copy_struct(s)
     T = typeof(s)
     fields = fieldnames(T)
     return T(map(x -> getfield(s, x), fields)...)
+end
+
+function _compute_intermediate(P::Params)
+    Δs = P.L / P.N
+    rho_eq = P.M / P.L
+
+    return IntermediateParams(
+                              Δs, rho_eq,
+                              NaN, NaN, NaN
+                             )
 end
 
 function compute_intermediate(P::Params, S::Stiffness)
@@ -243,7 +257,7 @@ end
 
 function build_flower(P::Params, IP::IntermediateParams, S::Stiffness,
         Xinit::Vector{Float64}, SP::SolverParams=SolverParams(); include_multipliers::Bool=false,
-        energy_circle::Float64=0.0)
+        energy_circle::Float64=0.0, dump_system::Bool=false, dump_dir::String=".")
 
     matrices = assemble_fd_matrices(P, IP; winding_number=compute_winding_number(P, Xinit))
 
@@ -294,6 +308,8 @@ function build_flower(P::Params, IP::IntermediateParams, S::Stiffness,
         end
     end
 
+    rho_extrema = extrema(c.ρ)
+
 
     # Loop until tolerance or max. iterations is met
     function _f()
@@ -303,6 +319,8 @@ function build_flower(P::Params, IP::IntermediateParams, S::Stiffness,
 
         n_newton = 0
         iter_stationary_res = 0
+
+        newton_failed = false
 
         while true
             n_newton += 1
@@ -315,6 +333,16 @@ function build_flower(P::Params, IP::IntermediateParams, S::Stiffness,
 
             # Solve
             @. mm_term_up = X_up - Xj_up
+
+            if dump_system
+                open(joinpath(dump_dir, "A.dat"), "w") do f
+                    Serialization.serialize(f, id_matrix .+ time_step_size*A)
+                end
+                open(joinpath(dump_dir, "b.dat"), "w") do f
+                    Serialization.serialize(f, -time_step_size*residual + mm_term)
+                end
+            end
+
             δX .= (id_matrix .+ time_step_size*A)\(-time_step_size*residual + mm_term)
 
             Xj_prev .= Xj
@@ -344,17 +372,11 @@ function build_flower(P::Params, IP::IntermediateParams, S::Stiffness,
 
                 # adapt
                 if SP.adapt
-                    if step_norm < SP.step_up_threshold
+                    if step_norm < SP.step_up_threshold && !newton_failed
                         if time_step_size < SP.max_step_size
                             time_step_size = min(SP.max_step_size, time_step_size*SP.step_factor)
                             println()
                             println(@sprintf("|X-Xprev| = %.5e, time step ↑ (%f)", step_norm, time_step_size))
-                            Xj_prev .= X
-                            Xj .= X
-
-                            n_newton = 0
-                            iter_stationary_res = 0
-                            continue
                         end
                     elseif step_norm > SP.step_down_threshold
                         if time_step_size == SP.min_step_size
@@ -373,19 +395,36 @@ function build_flower(P::Params, IP::IntermediateParams, S::Stiffness,
                 end
 
 
-                print(@sprintf("%s[%d/%d] t=%f, Eµ: %.5e/%.5e, |X-Xprev|: %.5e", "\b"^1000, n, n_newton, t_i[max(1,n-1)] + time_step_size, eρ+eθ, eρ+eθ-energy_circle, step_norm))
+                print(@sprintf("%s[%d/%d] t=%f, Eµ: %.5e/%.5e, |X-Xprev|: %.5e, %.2f ≤ ρ ≤ %.2f", "\b"^1000, n, n_newton, t_i[max(1,n-1)] + time_step_size, eρ+eθ, eρ+eθ-energy_circle, step_norm, rho_extrema[1], rho_extrema[2]))
                 break
             end
 
             if n_newton > SP.newton_max_iter
+                if time_step_size == SP.min_step_size
+                    throw(TimeStepTooSmall())
+                end
+                time_step_size = max(SP.min_step_size, time_step_size/SP.step_factor)
                 println()
-                throw(MaxInterationReached())
+                println(@sprintf("[Newton failed] |X-Xprev| = %.5e, time step ↓ (%f)", step_norm, time_step_size))
+                Xj_prev .= X
+                Xj .= X
+
+                newton_failed = true
+
+                n_newton = 0
+                iter_stationary_res = 0
+                continue
+                # println()
+                # throw(MaxInterationReached())
             end
         end
 
         # X += time_step_size*Xj
         step_norm = LA.norm(X - Xj, Inf)
         X .= Xj
+
+        rho_extrema = (min(rho_extrema[1], minimum(c.ρ)),
+                       max(rho_extrema[2], maximum(c.ρ)))
 
         n += 1
 
@@ -418,7 +457,8 @@ function compute_energy_split(P::Params, IP::IntermediateParams, S::Stiffness,
     ρ_dot = (circshift(c.ρ, -1) - c.ρ)/IP.Δs
     θ_dot = compute_centered_fd_θ(P, matrices, c.θ)
     beta = S.beta.(c.ρ)
-    return (0.5*P.µ*IP.Δs*sum(ρ_dot.^2), 0.5IP.Δs*sum(beta.*(θ_dot .- P.c0).^2))
+    E_ρ, E_θ = 0.5*P.µ*IP.Δs*sum(ρ_dot.^2), 0.5IP.Δs*sum(beta.*(θ_dot .- P.c0).^2)
+    return (E_ρ, E_θ)
 end
 
 function compute_energy(P::Params, IP::IntermediateParams, S::Stiffness,
@@ -665,13 +705,13 @@ end
 function do_flow(P::Params, S::Stiffness, Xinit::Vector{Float64}, solver_params::SolverParams;
         do_plot::Bool=false, include_multipliers::Bool=false, record_movie::Bool=false, pause_after_init::Bool=false,
         plot_each_iter::Int64=1, pause_after_plot::Bool=false, snapshots_iters::Vector{Int}=Int[],
-        snapshots_times::Vector{Float64}=Float64[], output_dir::String="output", kwargs...)
+        snapshots_times::Vector{Float64}=Float64[], output_dir::String="output", dump_system::Bool=false, kwargs...)
 
     IP = compute_intermediate(P, S)
 
     mkpath(output_dir)
 
-    plain_plot = !isempty(snapshots_iters) || !isempty(snapshots_times)
+    plain_plot = !isempty(snapshots_iters) || !isempty(snapshots_times) && !record_movie
 
     wn = compute_winding_number(P, Xinit)
 
@@ -682,15 +722,15 @@ function do_flow(P::Params, S::Stiffness, Xinit::Vector{Float64}, solver_params:
         energy_circle = P.L * S.beta(ρ_equi) * (k_equi - P.c0)^2 / 2
     else
         k_equi = 0.0
-        energy_circle = 0.0
+        energy_circle = 8.94665
     end
-
-
 
     Xx = copy(Xinit)
     Xx_prev = copy(Xinit)
 
-    flower, matrices = build_flower(P, IP, S, Xx, solver_params; include_multipliers=include_multipliers, energy_circle=energy_circle)
+    flower, matrices = build_flower(P, IP, S, Xx, solver_params;
+                                    include_multipliers=include_multipliers, energy_circle=energy_circle,
+                                    dump_system=dump_system, dump_dir=output_dir)
 
     eρ, eθ = compute_energy_split(P, IP, S, matrices, Xinit)
 
@@ -713,9 +753,11 @@ function do_flow(P::Params, S::Stiffness, Xinit::Vector{Float64}, solver_params:
     if do_plot
         fig, update_plot = init_plot(P, IP, S, Xx; plain=plain_plot)
         if length(snapshots_iters) + length(snapshots_times) > 0
-            save_path = joinpath(output_dir, "snapshots", "0.pdf")
+            save_path = joinpath(output_dir, "snapshots", "n=0_t=0.pdf")
             @info "Saving initial snapshot under $save_path"
-            M.save(save_path, fig)
+            if string(M) == "CairoMakie"
+                M.save(save_path, fig)
+            end
         end
         if pause_after_init
             println("Hit enter to start.")
@@ -737,6 +779,11 @@ function do_flow(P::Params, S::Stiffness, Xinit::Vector{Float64}, solver_params:
         next_snapshot_time = snapshots_times[next_snapshot_time_idx]
     end
 
+    if record_movie
+        vs = M.VideoStream(fig, framerate=10)
+        M.recordframe!(vs)
+    end
+
     function iter_flower(_i)
         res = flower()
 
@@ -744,17 +791,11 @@ function do_flow(P::Params, S::Stiffness, Xinit::Vector{Float64}, solver_params:
         n = res.iter
 
         if n % plot_each_iter == 0
-            # println()
-            # print(n)
-
-            # print(", energy/rel: ")
-            # print(res.energy_i[n], "/", res.energy_i[n] - energy_circle)
-            # print(", residual norm: ")
-            # print(res.residual_norm_i[n])
-            # print(", min/max ρ: ")
-            # @show extrema(view(Xx, 1:P.N))
             if do_plot
                 update_plot(res.sol, (@sprintf "%d, energy/rel: %.4f/%.4f" n res.energy_i[n]  (res.energy_i[n] - energy_circle)), res)
+                if record_movie
+                    M.recordframe!(vs)
+                end
                 if pause_after_plot
                     print("Press Enter to continue ")
                     readline()
@@ -774,28 +815,44 @@ function do_flow(P::Params, S::Stiffness, Xinit::Vector{Float64}, solver_params:
             println(res.converged)
             if do_plot
                 update_plot(res.sol, (@sprintf "%d, energy/rel: %.4f/%.4f" n res.energy_i[n]  (res.energy_i[n] - energy_circle)), res)
-                save_path = joinpath(output_dir, "snapshots", "last.pdf")
+                if record_movie
+                    M.recordframe!(vs)
+                end
+                rounded_t = round(res.t_i[n]; digits=5)
+                save_path = joinpath(output_dir, "snapshots", "n=$(res.iter)_t=$(rounded_t).last.pdf")
                 @info "Saving final snapshot under $save_path"
-                M.save(save_path, fig)
+                if string(M) == "CairoMakie"
+                    M.save(save_path, fig)
+                end
             end
             done[1] = true
 
-            save_snapshot(h5_fn, P, next_snapshot_idx, res; n_last=res.iter)
+            try
+                save_snapshot(h5_fn, P, next_snapshot_idx, res; n_last=res.iter)
+            catch
+                return
+            end
         else
             if n in snapshots_iters
-                save_path = joinpath(output_dir, "snapshots", "iter_$(n)_t=$(res.t_i[n]).pdf")
+                rounded_t = round(res.t_i[n]; digits=5)
+                save_path = joinpath(output_dir, "snapshots", "n=$(n)_t=$(rounded_t).pdf")
                 println()
                 @info "Saving snapshot under $save_path"
-                M.save(save_path, fig)
+                if string(M) == "CairoMakie"
+                    M.save(save_path, fig)
+                end
                 save_snapshot(h5_fn, P, next_snapshot_idx, res)
                 next_snapshot_idx += 1
             end
 
             if res.t_i[n] > next_snapshot_time
-                save_path = joinpath(output_dir, "snapshots", "time_$(n)_t=$(res.t_i[n]).pdf")
+                rounded_t = round(res.t_i[n]; digits=5)
+                save_path = joinpath(output_dir, "snapshots", "n=$(n)_t=$(rounded_t).pdf")
                 println()
                 @info "Saving snapshot under $save_path"
-                M.save(save_path, fig)
+                if string(M) == "CairoMakie"
+                    M.save(save_path, fig)
+                end
                 save_snapshot(h5_fn, P, next_snapshot_idx, res)
                 next_snapshot_idx += 1
                 if length(snapshots_times) > next_snapshot_time_idx
@@ -809,12 +866,12 @@ function do_flow(P::Params, S::Stiffness, Xinit::Vector{Float64}, solver_params:
         end
     end
 
+    while !done[1]
+        iter_flower(1)
+    end
     if record_movie
-        GLMakie.record(iter_flower, fig, joinpath(output_dir, "output.mp4"), iter, framerate=10)
-    else
-        while !done[1]
-            iter_flower(1)
-        end
+        # GLMakie.record(iter_flower, fig, joinpath(output_dir, "output.mp4"), iter, framerate=10)
+        M.save(joinpath(output_dir, "output.mp4"), vs)
     end
 end
 
@@ -949,11 +1006,11 @@ function initial_data_polar(P::Params, r::Function, r_params::NamedTuple)
 
     φs = range(0, 2π, N+1)[1:N]
     # rhos = r_parameterized.(φs .+ rho_phase)
-    rhos = cos.(2*(φs .+ rho_phase))
+    rhos = sin.(r_params.rho_wave_number*(φs .+ rho_phase))
     extrema_rho = extrema(rhos)
     p2p_rho = extrema_rho[2] - extrema_rho[1]
     if p2p_rho > 1e-7
-        rhos .= (rhos .- extrema_rho[1])/p2p_rho*rho_amplitude
+        rhos .= (rhos .- extrema_rho[1])/p2p_rho*2rho_amplitude
     else
         @warn "The provided function r has very low amplitude, not rescaling ρ"
     end
@@ -989,10 +1046,7 @@ function initial_data_from_dict(P, d, x_functions)
     end
 end
 
-function parse_configuration(filename::String, function_defs::Dict)
-    T = TOML.parsefile(filename)
-    x = Symbolics.variable(:x)
-
+function params_from_toml(T::Dict)
     # Model parameters
     N  = eval_if_string(T["model"]["N"])
     L  = eval_if_string(T["model"]["L"])
@@ -1004,7 +1058,14 @@ function parse_configuration(filename::String, function_defs::Dict)
     ρ_max = 1000
     potential_range = -1
 
-    P = Params(N=N, L=L, M=M, c0=c0, μ=mu, ρ_max=ρ_max, potential_range=potential_range)
+    return Params(N=N, L=L, M=M, c0=c0, μ=mu, ρ_max=ρ_max, potential_range=potential_range)
+end
+
+function parse_configuration(filename::String, function_defs::Dict)
+    T = TOML.parsefile(filename)
+    x = Symbolics.variable(:x)
+
+    P = params_from_toml(T)
 
     # Solver parameters
     solver_params = SolverParams(;zip(map(Symbol, collect(keys(T["solver"]))), values(T["solver"]))...)
@@ -1083,6 +1144,25 @@ function parse_configuration(filename::String, function_defs::Dict)
     Xinit = initial_data_from_dict(P, T["initial_data"], (r_func=r_func, p_func=p_func))
 
     return P, S, Xinit, solver_params, options
+end
+
+function resample(X::Vector{Float64}, new_N::Int64)
+    old_N = Int((size(X, 1) - 3)/2)
+
+    if new_N == old_N
+        return X
+    end
+
+    old_ρ = X[1:old_N]
+    old_θ = X[old_N+1:2old_N]
+
+    s = range(0, 2π; length=old_N+1)[1:old_N]
+
+    new_ρ = EvenParam.resample(old_ρ, s, new_N; periodicise=true)
+    new_θ = EvenParam.resample(old_θ, s, new_N; append=[round(old_θ[end]/π)*π])
+
+    m = vcat(new_ρ, new_θ, X[2old_N+1:end])
+    return m
 end
 
 end # module

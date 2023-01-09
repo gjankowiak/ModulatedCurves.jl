@@ -1,17 +1,16 @@
-# import GLMakie
-# M = GLMakie
-import CairoMakie
-M = CairoMakie
+ import GLMakie
+ M = GLMakie
+# import CairoMakie
+# M = CairoMakie
 M.activate!()
 
 function isconstant(v::Vector{Float64}, tol::Float64=1e-10)
     m, M = extrema(v)
-    @show extrema(v)
     return M - m < tol
 end
 
 function init_plot(P::Params, IP::IntermediateParams, S::Stiffness, X::Vector{Float64}; label::String="", plain::Bool=false,
-                   rho_factor::Float64=100.0)
+                   rho_factor::Float64=2.0, plot_range::Float64=2.0)
 
     w = compute_winding_number(P, X)
 
@@ -43,8 +42,7 @@ function init_plot(P::Params, IP::IntermediateParams, S::Stiffness, X::Vector{Fl
     M.hidedecorations!(axes[1, 1])
     M.hidespines!(axes[1, 1])
 
-    w_plus = max(1,w)
-    M.limits!(axes[1,1], -2, 2, -2, 2)
+    M.limits!(axes[1,1], -plot_range, plot_range, -plot_range, plot_range)
     # M.limits!(axes[1,1], -1.5/w_plus, 1.5/w_plus, -1.5/w_plus, 1.5/w_plus)
 
     if !plain
@@ -109,11 +107,14 @@ function init_plot(P::Params, IP::IntermediateParams, S::Stiffness, X::Vector{Fl
 
     θ_dotdot_node = M.@lift compute_θ_dotdot($c_node.θ)
 
-    function update(X::Vector{Float64}, title::String, result::Result)
+    function update(X::Vector{Float64}, title::String, result::Union{Result,Nothing})
         X_node[] = X
         c = X2candidate(P, X; copy=false)
 
         if !plain
+            if isnothing(result)
+                throw(ArgumentError("result must be provided for a full plot"))
+            end
             axes[1,1].title = title
             if int_θ_0 == Inf
                 int_θ_0 = result.int_θ_i[1]
@@ -204,7 +205,7 @@ function init_plot(P::Params, IP::IntermediateParams, S::Stiffness, X::Vector{Fl
     # M.hlines!(axes[2,3], 0.0, color="gray")
     # axes[2,3].yticks = M.MultiplesTicks(4, pi, "π")
 
-    M.display(fig)
+    # M.display(fig)
 
     return fig, update
 
