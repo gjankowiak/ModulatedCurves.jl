@@ -20,7 +20,8 @@ import Serialization
 import TOML
 import Symbolics
 
-import JankoUtils: spdiagm_const
+import JankoUtils: spdiagm_const, compute_ls_intersect
+
 import EvenParam
 
 const SubA = SubArray{Float64,1,Array{Float64,1}}
@@ -394,8 +395,11 @@ function build_flower(P::Params, IP::IntermediateParams, S::Stiffness,
                     end
                 end
 
+                (intersect_i, intersect_j) = is_simple(P, IP, X)
 
-                print(@sprintf("%s[%d/%d] t=%f, Eµ: %.5e/%.5e, |X-Xprev|: %.5e, %.2f ≤ ρ ≤ %.2f", "\b"^1000, n, n_newton, t_i[max(1,n-1)] + time_step_size, eρ+eθ, eρ+eθ-energy_circle, step_norm, rho_extrema[1], rho_extrema[2]))
+
+                print(@sprintf("%s[%d/%d] t=%f, Eµ: %.5e/%.5e, |X-Xprev|: %.5e, %.2f ≤ ρ ≤ %.2f, (%d,%d)", "\b"^1000, n, n_newton, t_i[max(1,n-1)] + time_step_size, eρ+eθ, eρ+eθ-energy_circle, step_norm, rho_extrema[1], rho_extrema[2], intersect_i, intersect_j))
+                println()
                 break
             end
 
@@ -666,6 +670,38 @@ function save_snapshot(h5_fn::String, P::Params, next_snapshot_idx::Int64, X::Ve
     close(h5)
 end
 
+function compute_xy(P::Params, IP::IntermediateParams, X::Vector{Float64})
+    c = X2candidate(P, X)
+    xy = zeros(P.N+1, 2)
+
+    for i in 2:P.N+1
+        xy[i,:] = xy[i-1,:] + IP.Δs*[cos(c.θ[i-1]); sin(c.θ[i-1])]
+    end
+
+    bc = sum(xy, dims=1)/P.N
+    xy = xy .- bc
+
+    return xy
+end
+
+function is_simple(P::Params, IP::IntermediateParams, X::Vector{Float64})
+    xy = compute_xy(P, IP, X)
+    for i in 1:P.N
+        for j in i+2:P.N
+            if i == 1 && j == P.N
+                # the first segment and the last segment
+                # intersect at the origin, skip this case
+                continue
+            end
+            xx = compute_ls_intersect(xy[i,:], xy[i+1,:], xy[j,:], xy[j+1,:])
+            if !ismissing(xx[1])
+                return (i, j)
+            end
+        end
+    end
+    return (-1,-1)
+end
+
 function save_snapshot(h5_fn::String, P::Params, next_snapshot_idx::Int64, res::Result; n_last::Int64=0)
     n = res.iter
     @info "Saving iteration $n"
@@ -705,7 +741,7 @@ end
 function do_flow(P::Params, S::Stiffness, Xinit::Vector{Float64}, solver_params::SolverParams;
         do_plot::Bool=false, include_multipliers::Bool=false, record_movie::Bool=false, pause_after_init::Bool=false,
         plot_each_iter::Int64=1, pause_after_plot::Bool=false, snapshots_iters::Vector{Int}=Int[],
-        snapshots_times::Vector{Float64}=Float64[], output_dir::String="output", dump_system::Bool=false, kwargs...)
+        snapshots_times::Vector{Float64}=Float64[], output_dir::String="output", dump_system::Bool=false, rho_factor=2.0, plot_range=1.2, kwargs...)
 
     IP = compute_intermediate(P, S)
 
@@ -734,6 +770,10 @@ function do_flow(P::Params, S::Stiffness, Xinit::Vector{Float64}, solver_params:
 
     eρ, eθ = compute_energy_split(P, IP, S, matrices, Xinit)
 
+    @info "E0 = $(eρ + eθ)"
+    @info "Eρ = $eρ"
+    @info "Eθ = $eθ"
+
     h5_fn = joinpath(output_dir, "data.hdf5")
     HDF5.h5open(h5_fn, "w") do h5
         h5["rho_equi"] = ρ_equi
@@ -751,11 +791,11 @@ function do_flow(P::Params, S::Stiffness, Xinit::Vector{Float64}, solver_params:
     next_snapshot_idx = 1
 
     if do_plot
-        fig, update_plot = init_plot(P, IP, S, Xx; plain=plain_plot)
+        fig, update_plot = init_plot(P, IP, S, Xx; plain=plain_plot, rho_factor=rho_factor, plot_range=plot_range)
         if length(snapshots_iters) + length(snapshots_times) > 0
-            save_path = joinpath(output_dir, "snapshots", "n=0_t=0.pdf")
-            @info "Saving initial snapshot under $save_path"
+            save_path = joinpath(output_dir, "snapshots", "n=00000_t=0.pdf")
             if string(M) == "CairoMakie"
+                @info "Saving initial snapshot under $save_path"
                 M.save(save_path, fig)
             end
         end
@@ -792,7 +832,7 @@ function do_flow(P::Params, S::Stiffness, Xinit::Vector{Float64}, solver_params:
 
         if n % plot_each_iter == 0
             if do_plot
-                update_plot(res.sol, (@sprintf "%d, energy/rel: %.4f/%.4f" n res.energy_i[n]  (res.energy_i[n] - energy_circle)), res)
+                update_plot(res.sol, (@sprintf "t=%f, %d, energy/rel: %.4f/%.4f" res.t_i[n] n res.energy_i[n]  (res.energy_i[n] - energy_circle)), res)
                 if record_movie
                     M.recordframe!(vs)
                 end
@@ -814,14 +854,14 @@ function do_flow(P::Params, S::Stiffness, Xinit::Vector{Float64}, solver_params:
             print("Finished, converged: ")
             println(res.converged)
             if do_plot
-                update_plot(res.sol, (@sprintf "%d, energy/rel: %.4f/%.4f" n res.energy_i[n]  (res.energy_i[n] - energy_circle)), res)
+                update_plot(res.sol, (@sprintf "t=%f, %d, energy/rel: %.4f/%.4f" res.t_i[n] n res.energy_i[n]  (res.energy_i[n] - energy_circle)), res)
                 if record_movie
                     M.recordframe!(vs)
                 end
                 rounded_t = round(res.t_i[n]; digits=5)
-                save_path = joinpath(output_dir, "snapshots", "n=$(res.iter)_t=$(rounded_t).last.pdf")
-                @info "Saving final snapshot under $save_path"
+                save_path = joinpath(output_dir, "snapshots", "n=$(lpad(res.iter, 5, "0"))_t=$(rounded_t).last.pdf")
                 if string(M) == "CairoMakie"
+                    @info "Saving final snapshot under $save_path"
                     M.save(save_path, fig)
                 end
             end
@@ -835,10 +875,10 @@ function do_flow(P::Params, S::Stiffness, Xinit::Vector{Float64}, solver_params:
         else
             if n in snapshots_iters
                 rounded_t = round(res.t_i[n]; digits=5)
-                save_path = joinpath(output_dir, "snapshots", "n=$(n)_t=$(rounded_t).pdf")
+                save_path = joinpath(output_dir, "snapshots", "n=$(lpad(n, 5, "0"))_t=$(rounded_t).pdf")
                 println()
-                @info "Saving snapshot under $save_path"
                 if string(M) == "CairoMakie"
+                    @info "Saving snapshot under $save_path"
                     M.save(save_path, fig)
                 end
                 save_snapshot(h5_fn, P, next_snapshot_idx, res)
@@ -847,10 +887,10 @@ function do_flow(P::Params, S::Stiffness, Xinit::Vector{Float64}, solver_params:
 
             if res.t_i[n] > next_snapshot_time
                 rounded_t = round(res.t_i[n]; digits=5)
-                save_path = joinpath(output_dir, "snapshots", "n=$(n)_t=$(rounded_t).pdf")
+                save_path = joinpath(output_dir, "snapshots", "n=$(lpad(n, 5, "0"))_t=$(rounded_t).pdf")
                 println()
-                @info "Saving snapshot under $save_path"
                 if string(M) == "CairoMakie"
+                    @info "Saving snapshot under $save_path"
                     M.save(save_path, fig)
                 end
                 save_snapshot(h5_fn, P, next_snapshot_idx, res)
@@ -913,7 +953,7 @@ function initial_data_smooth(P::Params; sides::Int=1, smoothing::Float64, revers
     return [rhos; thetas; 0; 0; 0]
 end
 
-function initial_data_parametric(P::Params, p::Function, p_params::NamedTuple)
+function initial_data_parametric(P::Params, p::Function, rho_function::Union{Function,Nothing}, p_params::NamedTuple)
     N = P.N
 
     rho_amplitude = p_params.rho_amplitude
@@ -950,17 +990,29 @@ function initial_data_parametric(P::Params, p::Function, p_params::NamedTuple)
         thetas[i] = thetas[i-1] + rem(xy_angles[i] - thetas[i-1], Float64(π), RoundNearest)
     end
 
-    φs = range(0, 2π, N+1)[1:N]
-    rhos = vec(sqrt.(sum(abs2, xy_even; dims=2)))
-    extrema_rho = extrema(rhos)
-    p2p_rho = extrema_rho[2] - extrema_rho[1]
-    if p2p_rho > 1e-7
-        rhos .= (rhos .- extrema_rho[1])/p2p_rho*rho_amplitude
-    else
-        @warn "The provided function p has very low amplitude, not rescaling ρ"
-    end
+    if isnothing(rho_function)
+        rhos = vec(sqrt.(sum(abs2, xy_even; dims=2)))
+        extrema_rho = extrema(rhos)
+        p2p_rho = extrema_rho[2] - extrema_rho[1]
+        if p2p_rho > 1e-7
+            rhos .= (rhos .- extrema_rho[1])/p2p_rho*rho_amplitude
+        else
+            @warn "The provided function p has very low amplitude, not rescaling ρ"
+        end
 
-    rhos .-= (sum(rhos)/P.N - P.M/P.N)
+        rhos .-= (sum(rhos)/P.N - P.M/P.N)
+    else
+        rho_parameterized = (t) -> rho_function(t, p_params)
+        _ts = collect(range(p_params.t_min, p_params.t_max, length=P.N + 1))[1:P.N]
+        rhos = rho_parameterized.(_ts)
+        rhos ./= (P.L/P.N*sum(rhos))/P.M
+
+        @show (P.L/P.N*sum(rhos))
+
+        rhos_extrema = extrema(rhos)
+
+        println("$(rhos_extrema[1]) ≤ ρ0 ≤ $(rhos_extrema[2])")
+    end
 
     return [rhos; thetas; 0; 0; 0]
 end
@@ -1040,7 +1092,7 @@ function initial_data_from_dict(P, d, x_functions)
         return initial_data_smooth(P; kw...)
     elseif d["type"] == "parametric"
         p_params = NamedTuple{Tuple(Symbol.(keys(d_params)))}((values(d_params)))
-        return initial_data_parametric(P, x_functions.p_func, p_params)
+        return initial_data_parametric(P, x_functions.p_func, x_functions.rho_func, p_params)
     else
         throw("Unknown initial data type")
     end
@@ -1080,7 +1132,21 @@ function parse_configuration(filename::String, function_defs::Dict)
 
     local beta = function_defs[:beta][stiffness_key]
     local r_func = function_defs[:r][get(T["initial_data"], "r_key", "default")]
-    local p_func = function_defs[:p][get(T["initial_data"], "p_key", "default")]
+
+    p_key = get(T["initial_data"], "p_key", "default")
+    @info "Possible keys for parameteric initial data:"
+    @info join(keys(function_defs[:p]), ", ")
+
+    local p_func = function_defs[:p][p_key]
+
+    rho_key = get(T["initial_data"], "rho_key", "default")
+    @info "Possible keys for parameteric initial data:"
+    @info join(keys(function_defs[:rho]), ", ")
+    if rho_key != "default"
+        rho_func = function_defs[:rho][rho_key]
+    else
+        rho_func = nothing
+    end
 
     beta_expr = beta(x, stiffness_params)
     beta_prime_expr = Symbolics.derivative(beta_expr, x)
@@ -1141,7 +1207,7 @@ function parse_configuration(filename::String, function_defs::Dict)
     options = zip(map(Symbol, collect(keys(T["options"]))), values(T["options"]))
 
     # Initial condition
-    Xinit = initial_data_from_dict(P, T["initial_data"], (r_func=r_func, p_func=p_func))
+    Xinit = initial_data_from_dict(P, T["initial_data"], (r_func=r_func, p_func=p_func, rho_func=rho_func))
 
     return P, S, Xinit, solver_params, options
 end

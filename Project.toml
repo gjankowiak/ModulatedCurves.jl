@@ -5,6 +5,7 @@ version = "0.1.0"
 
 [deps]
 CairoMakie = "13f3f980-e62b-5c42-98c6-ff1f3baf88f0"
+Elliptic = "b305315f-e792-5b7a-8f41-49f472929428"
 EvenParam = "bcb3e14e-248c-11e9-14d9-6db38a995404"
 GLMakie = "e9467ef8-e4e7-5192-8a1a-b1aee30e663a"
 HDF5 = "f67ccb44-e63f-5c2f-98bd-6dc0ccc4ba2f"

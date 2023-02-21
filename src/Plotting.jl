@@ -1,7 +1,7 @@
- import GLMakie
- M = GLMakie
-# import CairoMakie
-# M = CairoMakie
+ # import GLMakie
+ # M = GLMakie
+import CairoMakie
+M = CairoMakie
 M.activate!()
 
 function isconstant(v::Vector{Float64}, tol::Float64=1e-10)
@@ -10,16 +10,33 @@ function isconstant(v::Vector{Float64}, tol::Float64=1e-10)
 end
 
 function init_plot(P::Params, IP::IntermediateParams, S::Stiffness, X::Vector{Float64}; label::String="", plain::Bool=false,
-                   rho_factor::Float64=2.0, plot_range::Float64=2.0)
+                   rho_factor::Float64=2.0, plot_range::Float64=1.2, no_circle::Bool=false, monochrome::Bool=false, show_nodes::Bool=false)
+
+    lean = false
 
     w = compute_winding_number(P, X)
 
     matrices = assemble_fd_matrices(P, IP; winding_number=w)
 
-    fig = M.Figure(resolution = (2000, 2000))
+    if lean
+        fig = M.Figure(resolution = (2000, 750))
+    else
+        fig = M.Figure(resolution = (2000, 2000))
+    end
 
     if plain
         axes = [M.Axis(fig[1, 1], aspect=M.AxisAspect(1))]
+    elseif lean
+        axes = [
+                M.Axis(fig[1:2, 1], aspect=M.AxisAspect(1)) M.Axis(fig[1, 2], title="Energy", xscale=log10) M.Axis(fig[2, 2], title=M.L"\leftarrow \dot{\theta} \qquad\qquad \ddot{\theta} \rightarrow")
+        ]
+        dual_axes = [M.Axis(fig[2, 2], yticklabelcolor = :red, yaxisposition = :right)]
+
+        x_logscale_axes = [axes[1, 2]]
+        y_logscale_axes = [axes[1, 2]]
+
+        M.hidexdecorations!.(dual_axes)
+        M.hidespines!.(dual_axes)
     else
         axes = [
                 M.Axis(fig[1, 1], aspect=M.AxisAspect(1)) M.Axis(fig[1, 2], title=M.L"\rho") M.Axis(fig[1, 3], title="← Energy | Residual →", xscale=log10);
@@ -45,11 +62,15 @@ function init_plot(P::Params, IP::IntermediateParams, S::Stiffness, X::Vector{Fl
     M.limits!(axes[1,1], -plot_range, plot_range, -plot_range, plot_range)
     # M.limits!(axes[1,1], -1.5/w_plus, 1.5/w_plus, -1.5/w_plus, 1.5/w_plus)
 
-    if !plain
+    if !plain && !lean
         M.limits!(axes[1,3], 0.5, 1.5, 0.5, 1.5)
         M.limits!(axes[2,3], 0.5, 1.5, 0.5, 1.5)
         M.limits!(dual_axes[1], 0.5, 1.5, 0.5, 1.5)
         M.limits!(dual_axes[3], 0.5, 1.5, -1.5, 1.5)
+    end
+
+    if lean
+        M.limits!(axes[1,2], 0.5, 1.5, 0.5, 1.5)
     end
 
     N = P.N
@@ -120,15 +141,16 @@ function init_plot(P::Params, IP::IntermediateParams, S::Stiffness, X::Vector{Fl
                 int_θ_0 = result.int_θ_i[1]
             end
 
-            ts_node[] = result.t_i .+ 1
+            last_nz_idx = findfirst(iszero, view(result.t_i, 2:length(result.t_i))) - 1
+            ts_node.val = result.t_i[1:last_nz_idx] .+ 1
 
             # extrema_int_θ = map(x -> round(x/π; digits=3), extrema(result.int_θ_i))
             # cur_int_θ = round(result.int_θ_i[end]/π; digits=3)
             # axes[2,3].title = "$(extrema_int_θ[1])π ≤ ∫θ = $(cur_int_θ)π ≤ $(extrema_int_θ[2])π"
 
-            energies_node[] = result.energy_i
-            energies_ρ_node[] = result.energy_ρ_i
-            energies_θ_node[] = result.energy_θ_i
+            energies_node[] = result.energy_i[1:last_nz_idx]
+            energies_ρ_node[] = result.energy_ρ_i[1:last_nz_idx]
+            energies_θ_node[] = result.energy_θ_i[1:last_nz_idx]
 
             diff_Eρ = diff(result.energy_ρ_i)
             diff_Eθ = diff(result.energy_θ_i)
@@ -168,15 +190,25 @@ function init_plot(P::Params, IP::IntermediateParams, S::Stiffness, X::Vector{Fl
     zipped_ρ_θ_dot_node = M.lift(c -> [[(ρ, θ_dot_node[][i]) for (i,ρ) in enumerate(c.ρ)]; (c.ρ[1], θ_dot_node[][1])], c_node)
     colors = M.lift(z -> map(t -> t[1] > 0 ? (t[2] >= 0.0 ? "blue" : "lightblue") : (t[2] >= 0.0 ? "red" : "pink"), z), zipped_ρ_θ_dot_node)
 
-    # M.lines!(axes[1,1], cos.(t), sin.(t), lw=0.5, color="gray")
-    M.scatterlines!(axes[1,1], M.lift(x -> x[:,1], xy_node), M.lift(x -> x[:,2], xy_node),
-                    markersize=M.lift(x -> rho_factor*abs.([x.ρ; x.ρ[1]]), c_node),
-                    markercolor=colors)
+    if !no_circle
+        M.lines!(axes[1,1], cos.(t), sin.(t), lw=0.5, color="gray")
+    end
+    if monochrome
+        M.scatterlines!(axes[1,1], M.lift(x -> x[:,1], xy_node), M.lift(x -> x[:,2], xy_node),
+                        markersize=M.lift(x -> rho_factor*abs.([x.ρ; x.ρ[1]]), c_node))
+    else
+        M.scatterlines!(axes[1,1], M.lift(x -> x[:,1], xy_node), M.lift(x -> x[:,2], xy_node),
+                        markersize=M.lift(x -> rho_factor*abs.([x.ρ; x.ρ[1]]), c_node),
+                        markercolor=colors)
+    end
     M.lines!(axes[1,1], M.lift(x -> x[:,1], xy_node), M.lift(x -> x[:,2], xy_node), color="black", linewidth=0.3)
                     # markercolor=M.lift(x -> map(v -> v>0 ? "blue" : "red", [x.ρ; x.ρ[1]]), )
     # M.scatter!(axes[1,1], M.lift(x -> [x[1,1]], xy_node), M.lift(x -> [x[1,2]], xy_node))
+    if show_nodes
+        M.scatter!(axes[1,1], M.lift(x -> x[:,1], xy_node), M.lift(x -> x[:,2], xy_node), color="black")
+    end
 
-    if !plain
+    if !plain && !lean
         M.lines!(axes[1,2], t, M.lift(x -> x.ρ, c_node))
         M.hlines!(axes[1,2], ρ_equi, color="gray")
 
@@ -195,6 +227,16 @@ function init_plot(P::Params, IP::IntermediateParams, S::Stiffness, X::Vector{Fl
 
         M.lines!(axes[2,3], diff_to_circle, color="blue")
         M.lines!(dual_axes[3], min_d_θ, color="red")
+    end
+
+    if lean
+        M.lines!(axes[1,2], ts_node, energies_node, color="blue")
+        # M.lines!(axes[1,2], ts_node, energies_ρ_node, color="blue", linestyle=:dot)
+        # M.lines!(axes[1,2], ts_node, energies_θ_node, color="blue", linestyle=:dash)
+        M.hlines!(axes[1,2], energy_circle, color="gray")
+
+        M.scatterlines!(axes[1,3], t, θ_dot_node_shifted, markersize=3, color="blue")
+        M.scatterlines!(dual_axes[1], t, θ_dotdot_node, markersize=3, color="red")
     end
 
     # Evolution of the kinetic/potential energy
