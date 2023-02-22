@@ -113,14 +113,10 @@ end
 
 function get_first_frequency(u, plans, symb)
     c = abs.(plans.p*u)
-    if symb == :θ
-        # we skip the first frequency for θ which is always non zero
-        # since the integral of θ is preserved along the flow
-        # we can mask the first Fourier coefficient of the increment
-        idx = findfirst(x -> !isapprox(x, 0, atol=1e-10), view(c, 2:length(c))) + 1
-    else
-        idx = findfirst(x -> !isapprox(x, 0, atol=1e-10), c)
-    end
+    # we skip the first frequency for θ which is always non zero
+    # since the integrals of θ and ρ are preserved along the flow
+    # we can mask the first Fourier coefficient of the increment
+    idx = findfirst(x -> !isapprox(x, 0, atol=1e-10), view(c, 2:length(c))) + 1
     @info "Amplitudes for $(symb)"
     @info "First frequency: $(idx), $(plans.freqs[idx])"
     return idx, plans.freqs[idx]
