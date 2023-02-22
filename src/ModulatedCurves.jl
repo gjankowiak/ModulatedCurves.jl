@@ -13,9 +13,13 @@ const LA = LinearAlgebra
 import SparseArrays
 const SA = SparseArrays
 
+import UnicodePlots
+
 import HDF5
 
 import Serialization
+
+import FFTW
 
 import TOML
 import Symbolics
@@ -93,6 +97,42 @@ end
 
 function candidate2X(P::Params, c::Candidate)
     return [c.ρ; c.θ; c.λx; c.λy; c.λM]
+end
+
+function prepare_fft_plans(n::Int)
+    v_r = zeros(Float64, n)
+    p = FFTW.plan_rfft(v_r)
+
+    v_i = zeros(ComplexF64, length(p*zeros(n)))
+    ip = FFTW.plan_irfft(v_i, n)
+
+    freqs = abs.(FFTW.fftfreq(n, n)[1:n÷2+1])
+
+    return (p = p, ip = ip, freqs = freqs)
+end
+
+function get_first_frequency(u, plans, symb)
+    c = abs.(plans.p*u)
+    if symb == :θ
+        # we skip the first frequency for θ which is always non zero
+        # since the integral of θ is preserved along the flow
+        # we can mask the first Fourier coefficient of the increment
+        idx = findfirst(x -> !isapprox(x, 0, atol=1e-10), view(c, 2:length(c))) + 1
+    else
+        idx = findfirst(x -> !isapprox(x, 0, atol=1e-10), c)
+    end
+    @info "Amplitudes for $(symb)"
+    @info "First frequency: $(idx), $(plans.freqs[idx])"
+    return idx, plans.freqs[idx]
+end
+
+function build_highpass_mask(u, plans, symb)
+    idx, freq0 = get_first_frequency(u, plans, symb)
+    return [i >= idx for i in 1:(length(u)÷2 + 1)]
+end
+
+function apply_fft_mask(u, mask, plans)
+    return plans.ip*(mask .* (plans.p * u))
 end
 
 """
@@ -258,9 +298,14 @@ end
 
 function build_flower(P::Params, IP::IntermediateParams, S::Stiffness,
         Xinit::Vector{Float64}, SP::SolverParams=SolverParams(); include_multipliers::Bool=false,
-        energy_circle::Float64=0.0, dump_system::Bool=false, dump_dir::String=".")
+        energy_circle::Float64=0.0, dump_system::Bool=false, dump_dir::String=".",
+        highpass::Bool=false)
 
-    matrices = assemble_fd_matrices(P, IP; winding_number=compute_winding_number(P, Xinit))
+    winding_number = compute_winding_number(P, Xinit)
+
+    matrices = assemble_fd_matrices(P, IP; winding_number=winding_number)
+
+    s = collect(range(0, P.L, length=P.N+1))[1:P.N]
 
     # Initialization
     history = History(0, zeros(2*P.N+3))
@@ -311,6 +356,14 @@ function build_flower(P::Params, IP::IntermediateParams, S::Stiffness,
 
     rho_extrema = extrema(c.ρ)
 
+    if highpass
+        fft_plans = prepare_fft_plans(P.N)
+        θ_flat = c.θ - 2π*winding_number*s/P.L
+        fft_mask_θ = build_highpass_mask(c.θ - winding_number*s, fft_plans, :θ)
+        fft_mask_ρ = build_highpass_mask(c.ρ, fft_plans, :ρ)
+        fft_mask = fft_mask_θ .|| fft_mask_ρ
+    end
+
 
     # Loop until tolerance or max. iterations is met
     function _f()
@@ -345,6 +398,12 @@ function build_flower(P::Params, IP::IntermediateParams, S::Stiffness,
             end
 
             δX .= (id_matrix .+ time_step_size*A)\(-time_step_size*residual + mm_term)
+
+            if highpass
+                δX[1:P.N] = apply_fft_mask(view(δX, 1:P.N), fft_mask, fft_plans)
+                δX[P.N+1:2P.N] = apply_fft_mask(view(δX, P.N+1:2P.N), fft_mask, fft_plans)
+                # TODO update Lagrange multipliers too
+            end
 
             Xj_prev .= Xj
 
@@ -741,7 +800,7 @@ end
 function do_flow(P::Params, S::Stiffness, Xinit::Vector{Float64}, solver_params::SolverParams;
         do_plot::Bool=false, include_multipliers::Bool=false, record_movie::Bool=false, pause_after_init::Bool=false,
         plot_each_iter::Int64=1, pause_after_plot::Bool=false, snapshots_iters::Vector{Int}=Int[],
-        snapshots_times::Vector{Float64}=Float64[], output_dir::String="output", dump_system::Bool=false, rho_factor=2.0, plot_range=1.2, kwargs...)
+        snapshots_times::Vector{Float64}=Float64[], output_dir::String="output", dump_system::Bool=false, rho_factor=2.0, plot_range=1.2, highpass::Bool=false, kwargs...)
 
     IP = compute_intermediate(P, S)
 
@@ -766,7 +825,7 @@ function do_flow(P::Params, S::Stiffness, Xinit::Vector{Float64}, solver_params:
 
     flower, matrices = build_flower(P, IP, S, Xx, solver_params;
                                     include_multipliers=include_multipliers, energy_circle=energy_circle,
-                                    dump_system=dump_system, dump_dir=output_dir)
+                                    dump_system=dump_system, dump_dir=output_dir, highpass=highpass)
 
     eρ, eθ = compute_energy_split(P, IP, S, matrices, Xinit)
 
