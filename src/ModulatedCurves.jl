@@ -24,6 +24,8 @@ import FFTW
 import TOML
 import Symbolics
 
+import DelimitedFiles: readdlm
+
 import JankoUtils: spdiagm_const, compute_ls_intersect
 
 import EvenParam
@@ -116,7 +118,7 @@ function get_first_frequency(u, plans, symb)
     # we skip the first frequency for θ which is always non zero
     # since the integrals of θ and ρ are preserved along the flow
     # we can mask the first Fourier coefficient of the increment
-    idx = findfirst(x -> !isapprox(x, 0, atol=1e-10), view(c, 2:length(c))) + 1
+    idx = something(findfirst(x -> !isapprox(x, 0, atol=1e-10), view(c, 2:length(c))), 0) + 1
     @info "Amplitudes for $(symb)"
     @info "First frequency: $(idx), $(plans.freqs[idx])"
     return idx, plans.freqs[idx]
@@ -843,12 +845,11 @@ function do_flow(P::Params, S::Stiffness, Xinit::Vector{Float64}, solver_params:
     end
 
     save_snapshot(h5_fn, P, 0, Xinit, 0.0, 0, eρ, eθ)
-    next_snapshot_idx = 1
 
     if do_plot
-        fig, update_plot = init_plot(P, IP, S, Xx; plain=plain_plot, rho_factor=rho_factor, plot_range=plot_range)
+        fig, update_plot = init_plot(P, IP, S, Xx; plain=plain_plot, rho_factor=rho_factor, plot_range=plot_range, no_circle=false)
         if length(snapshots_iters) + length(snapshots_times) > 0
-            save_path = joinpath(output_dir, "snapshots", "n=00000_t=0.pdf")
+            save_path = joinpath(output_dir, "snapshots", "s=$(lpad(0, 3, "0"))_n=00000_t=0.pdf")
             if string(M) == "CairoMakie"
                 @info "Saving initial snapshot under $save_path"
                 M.save(save_path, fig)
@@ -860,6 +861,7 @@ function do_flow(P::Params, S::Stiffness, Xinit::Vector{Float64}, solver_params:
         end
     end
 
+    next_snapshot_idx = 1
 
     local res
 
@@ -914,7 +916,7 @@ function do_flow(P::Params, S::Stiffness, Xinit::Vector{Float64}, solver_params:
                     M.recordframe!(vs)
                 end
                 rounded_t = round(res.t_i[n]; digits=5)
-                save_path = joinpath(output_dir, "snapshots", "n=$(lpad(res.iter, 5, "0"))_t=$(rounded_t).last.pdf")
+                save_path = joinpath(output_dir, "snapshots", "s=$(lpad(next_snapshot_idx, 3, "0"))_n=$(lpad(res.iter, 5, "0"))_t=$(rounded_t).last.pdf")
                 if string(M) == "CairoMakie"
                     @info "Saving final snapshot under $save_path"
                     M.save(save_path, fig)
@@ -930,7 +932,7 @@ function do_flow(P::Params, S::Stiffness, Xinit::Vector{Float64}, solver_params:
         else
             if n in snapshots_iters
                 rounded_t = round(res.t_i[n]; digits=5)
-                save_path = joinpath(output_dir, "snapshots", "n=$(lpad(n, 5, "0"))_t=$(rounded_t).pdf")
+                save_path = joinpath(output_dir, "snapshots", "s=$(lpad(next_snapshot_idx, 3, "0"))_n=$(lpad(n, 5, "0"))_t=$(rounded_t).pdf")
                 println()
                 if string(M) == "CairoMakie"
                     @info "Saving snapshot under $save_path"
@@ -942,7 +944,7 @@ function do_flow(P::Params, S::Stiffness, Xinit::Vector{Float64}, solver_params:
 
             if res.t_i[n] > next_snapshot_time
                 rounded_t = round(res.t_i[n]; digits=5)
-                save_path = joinpath(output_dir, "snapshots", "n=$(lpad(n, 5, "0"))_t=$(rounded_t).pdf")
+                save_path = joinpath(output_dir, "snapshots", "s=$(lpad(next_snapshot_idx, 3, "0"))_n=$(lpad(n, 5, "0"))_t=$(rounded_t).pdf")
                 println()
                 if string(M) == "CairoMakie"
                     @info "Saving snapshot under $save_path"
@@ -994,7 +996,9 @@ function initial_data_smooth(P::Params; sides::Int=1, smoothing::Float64, revers
         thetas = repeat(thetas_1p, sides) + repeat(2π/sides*(0:sides-1), inner=k)
     end
 
-    rhos = [cos.(2π*φ*rwn/P.L) for φ in range(0, 2π, P.N+1)[1:P.N]]
+    @show rho_phase
+
+    rhos = [cos.(2π*φ*rwn/P.L + rho_phase) for φ in range(0, 2π, P.N+1)[1:P.N]]
     extrema_rho = extrema(rhos)
     p2p_rho = extrema_rho[2] - extrema_rho[1]
     if p2p_rho > 1e-7
@@ -1006,6 +1010,14 @@ function initial_data_smooth(P::Params; sides::Int=1, smoothing::Float64, revers
     rhos .-= (sum(rhos)/P.N - P.M/P.N)
 
     return [rhos; thetas; 0; 0; 0]
+end
+
+function initial_data_theta(P::Params, theta_function::Function, rho_function::Function, p_params::NamedTuple)
+    t = collect(range(p_params.t_min, p_params.t_max, length=P.N+1))[1:P.N]
+    theta_parameterized = (φ) -> theta_function(φ, p_params)
+    rho_parameterized = (φ) -> rho_function(φ, p_params)
+
+    return [rho_parameterized.(t); theta_parameterized.(t); 0; 0; 0]
 end
 
 function initial_data_parametric(P::Params, p::Function, rho_function::Union{Function,Nothing}, p_params::NamedTuple)
@@ -1022,12 +1034,55 @@ function initial_data_parametric(P::Params, p::Function, rho_function::Union{Fun
 
     xy = permutedims(hcat(p_parameterized.(ts)...))
 
+    xy_delta = xy .- circshift(xy, 1)
+    xy_length = sum(hypot.(view(xy_delta, :, 1), view(xy_delta, :, 2)))
+
     # resample to get evenly spaced nodes
     # xy_even = EvenParam.reparam(xy; closed=true, new_N = N+1)[1:N,:]
     xy_even = EvenParam.reparam(xy; closed=true, new_N = N)
 
     # Recenter
     xy_even = xy_even .- [xy_even[1,1] xy_even[1,2]]
+
+    # Rescale
+    xy_even_delta = xy_even .- circshift(xy_even, 1)
+    xy_even_length_pre = sum(hypot.(view(xy_even_delta, :, 1), view(xy_even_delta, :, 2)))
+
+    xy_even .*= P.L / xy_length
+
+    xy_even_delta = xy_even .- circshift(xy_even, 1)
+    xy_even_length_post = sum(hypot.(view(xy_even_delta, :, 1), view(xy_even_delta, :, 2)))
+
+    @show xy_even_length_pre
+    @show xy_even_length_post
+
+    if get(p_params, :patch_x4_origin, false)
+        if !haskey(p_params, :padding)
+            @error "Cannot patch orgin without padding parameter"
+        else
+            patch_quarter_length = 10
+            patch_half_length = 2patch_quarter_length
+
+            N_half = P.N ÷ 2
+            x_out = xy_even[patch_half_length+1, 1]
+            y_out = xy_even[patch_half_length+1, 2]
+
+            c = y_out/x_out^4 # c < 0
+
+            @show x_out, y_out, c
+
+            coeff = max.(abs.(-patch_half_length:patch_half_length) .- patch_quarter_length, 0.0)
+            coeff ./= maximum(coeff)
+
+            coeff_start = coeff[2 + patch_half_length:end]
+            coeff_end = coeff[1:patch_half_length]
+
+            xy_even[2:1+patch_half_length,2] .= (1 .- coeff_start).*c.*xy_even[2:1+patch_half_length,1].^4 .+ coeff_start.*xy_even[2:1+patch_half_length,2]
+            xy_even[end-patch_half_length:end-1,2] .= (1 .- coeff_end).*c.*xy_even[end-patch_half_length:end-1,1].^4 .+ coeff_end.*xy_even[end-patch_half_length:end-1,2]
+
+            xy_even[N_half-patch_half_length:N_half+patch_half_length,2] .= (1 .- coeff).*(xy_even[N_half,2] .- c*xy_even[N_half-patch_half_length:N_half+patch_half_length,1].^4) .+ coeff.*xy_even[N_half-patch_half_length:N_half+patch_half_length,2]
+        end
+    end
 
     # Rotate so that the first segment is parallel to the x axis
     xy_even_c = xy_even[:,1] + xy_even[:,2]*im
@@ -1046,6 +1101,7 @@ function initial_data_parametric(P::Params, p::Function, rho_function::Union{Fun
     end
 
     if isnothing(rho_function)
+        @info "No initial distribution function for ρ specified"
         rhos = vec(sqrt.(sum(abs2, xy_even; dims=2)))
         extrema_rho = extrema(rhos)
         p2p_rho = extrema_rho[2] - extrema_rho[1]
@@ -1057,10 +1113,13 @@ function initial_data_parametric(P::Params, p::Function, rho_function::Union{Fun
 
         rhos .-= (sum(rhos)/P.N - P.M/P.N)
     else
+        @info "Initial distribution function for ρ specified"
         rho_parameterized = (t) -> rho_function(t, p_params)
         _ts = collect(range(p_params.t_min, p_params.t_max, length=P.N + 1))[1:P.N]
         rhos = rho_parameterized.(_ts)
-        rhos ./= (P.L/P.N*sum(rhos))/P.M
+        if P.M > 0
+            rhos ./= (P.L/P.N*sum(rhos))/P.M
+        end
 
         @show (P.L/P.N*sum(rhos))
 
@@ -1068,6 +1127,9 @@ function initial_data_parametric(P::Params, p::Function, rho_function::Union{Fun
 
         println("$(rhos_extrema[1]) ≤ ρ0 ≤ $(rhos_extrema[2])")
     end
+
+    println(UnicodePlots.lineplot(rhos, title="rho"))
+    println(UnicodePlots.lineplot(thetas, title="theta"))
 
     return [rhos; thetas; 0; 0; 0]
 end
@@ -1094,6 +1156,9 @@ function initial_data_polar(P::Params, r::Function, r_params::NamedTuple)
 
     # Recenter
     xy_even = xy_even .- [xy_even[1,1] xy_even[1,2]]
+
+    @show xy_even[1,:]
+    @show xy_even[end,:]
 
     # Rotate so that the first segment is parallel to the x axis
     xy_even_c = xy_even[:,1] + xy_even[:,2]*im
@@ -1127,6 +1192,51 @@ function initial_data_polar(P::Params, r::Function, r_params::NamedTuple)
     return [rhos; thetas; 0; 0; 0]
 end
 
+function initial_data_from_file(P::Params, filename::String, config_dir::String)
+    @show filename
+    data = readdlm(joinpath(config_dir, filename), ',')
+    @show size(data)
+    if size(data, 2) > 1
+        xy = data[:,1:2]
+        xy_even = EvenParam.reparam(xy; closed=true, new_N = P.N)
+        #
+        # Rotate so that the first segment is parallel to the x axis
+        xy_even_c = xy_even[:,1] + xy_even[:,2]*im
+        alpha = angle(xy_even_c[2])
+        xy_even_c = xy_even_c.*exp.(-im*alpha)
+
+        # Compute tangential angles
+        xy_even = [real.(xy_even_c) imag.(xy_even_c)]
+        xy_diff = circshift(xy_even, -1) - xy_even
+        xy_angles = angle.(xy_diff[:,1]+xy_diff[:,2]*im)
+
+        thetas = zeros(P.N)
+        thetas[1] = xy_angles[1]
+        for i in 2:P.N
+            thetas[i] = thetas[i-1] + rem(xy_angles[i] - thetas[i-1], Float64(π), RoundNearest)
+        end
+
+        if size(data, 2) > 2
+            rhos = data[:,3]
+            M_pre = P.L/P.N * sum(rhos)
+            if P.M < 1e-10
+                rhos .-= M_pre / P.L
+            elseif M_pre > 1e-10
+                rhos ./= M_pre / P.M
+            end
+        else
+            rhos = P.M/P.N*ones(P.N)
+        end
+        return [rhos; thetas; 0; 0; 0]
+    else
+        @show P.N
+        rhos = data[1:P.N]
+        thetas = data[P.N+1:2P.N]
+        @show rhos, thetas
+        return [rhos; thetas; 0; 0; 0]
+    end
+end
+
 function eval_if_string(v)
     if typeof(v) == String
         return eval(Meta.parse(v))
@@ -1135,8 +1245,10 @@ function eval_if_string(v)
     end
 end
 
-function initial_data_from_dict(P, d, x_functions)
-    d_params = d["parameters"][d["type"]]
+function initial_data_from_dict(P, d, x_functions, config_dir)
+    if d["type"] != "file"
+        d_params = d["parameters"][d["type"]]
+    end
 
     if d["type"] == "polar"
         # Convert Dict{String,Any} to NamedTuple
@@ -1148,6 +1260,12 @@ function initial_data_from_dict(P, d, x_functions)
     elseif d["type"] == "parametric"
         p_params = NamedTuple{Tuple(Symbol.(keys(d_params)))}((values(d_params)))
         return initial_data_parametric(P, x_functions.p_func, x_functions.rho_func, p_params)
+    elseif d["type"] == "theta"
+        p_params = NamedTuple{Tuple(Symbol.(keys(d_params)))}((values(d_params)))
+        return initial_data_theta(P, x_functions.theta_func, x_functions.rho_func, p_params)
+    elseif d["type"] == "file"
+        filename = d["filename"]
+        return initial_data_from_file(P, filename, config_dir)
     else
         throw("Unknown initial data type")
     end
@@ -1168,7 +1286,8 @@ function params_from_toml(T::Dict)
     return Params(N=N, L=L, M=M, c0=c0, μ=mu, ρ_max=ρ_max, potential_range=potential_range)
 end
 
-function parse_configuration(filename::String, function_defs::Dict)
+function parse_configuration(filename::String, function_defs::Dict; skip_init::Bool=false)
+    config_dir = dirname(filename)
     T = TOML.parsefile(filename)
     x = Symbolics.variable(:x)
 
@@ -1192,7 +1311,16 @@ function parse_configuration(filename::String, function_defs::Dict)
     @info "Possible keys for parameteric initial data:"
     @info join(keys(function_defs[:p]), ", ")
 
-    local p_func = function_defs[:p][p_key]
+    local p_func = get(function_defs[:p], p_key, nothing)
+
+    theta_key = get(T["initial_data"], "theta_key", "default")
+    @info "Possible keys for parameteric initial data:"
+    @info join(keys(function_defs[:theta]), ", ")
+    if theta_key != "default"
+        theta_func = function_defs[:theta][theta_key]
+    else
+        theta_func = nothing
+    end
 
     rho_key = get(T["initial_data"], "rho_key", "default")
     @info "Possible keys for parameteric initial data:"
@@ -1262,8 +1390,11 @@ function parse_configuration(filename::String, function_defs::Dict)
     options = zip(map(Symbol, collect(keys(T["options"]))), values(T["options"]))
 
     # Initial condition
-    Xinit = initial_data_from_dict(P, T["initial_data"], (r_func=r_func, p_func=p_func, rho_func=rho_func))
-
+    if skip_init
+        Xinit = nothing
+    else
+        Xinit = initial_data_from_dict(P, T["initial_data"], (r_func=r_func, p_func=p_func, rho_func=rho_func, theta_func=theta_func, monochrome=true), config_dir)
+    end
     return P, S, Xinit, solver_params, options
 end
 
