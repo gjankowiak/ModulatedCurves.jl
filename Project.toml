@@ -6,6 +6,7 @@ version = "0.1.0"
 [deps]
 ArgParse = "c7e460c6-2fb9-53a9-8c5b-16f535851c63"
 CairoMakie = "13f3f980-e62b-5c42-98c6-ff1f3baf88f0"
+DelimitedFiles = "8bb1440f-4735-579b-a4ab-409b98df4dab"
 Elliptic = "b305315f-e792-5b7a-8f41-49f472929428"
 EvenParam = "bcb3e14e-248c-11e9-14d9-6db38a995404"
 FFTW = "7a1cc6ca-52ef-59f5-83cd-3a7055c09341"
