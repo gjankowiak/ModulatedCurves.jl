@@ -33,8 +33,8 @@ import EvenParam
 const SubA = SubArray{Float64,1,Array{Float64,1}}
 
 include("./Types.jl")
-include("./Check.jl")
 include("./Plotting.jl")
+include("./Check.jl")
 
 function copy_struct(s)
     T = typeof(s)

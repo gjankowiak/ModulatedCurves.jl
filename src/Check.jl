@@ -1,3 +1,47 @@
+import GLMakie
+
+function check_energy_gradient(P::Params, S::Stiffness, X::Vector{Float64})
+    IP = compute_intermediate(P, S)
+    matrices = assemble_fd_matrices(P, IP; winding_number=compute_winding_number(P, X))
+
+    dir = rand(2P.N + 3)
+    dir[end-2:end] .= 0
+
+    e = compute_energy(P, IP, S, matrices, X)
+    r = compute_residual(P, IP, S, matrices, X)
+
+    exponents = [ -4, -5, -6, -7]
+    hs = 10.0 .^exponents
+
+    n = length(exponents)
+    errors = zeros(n)
+
+    for (i,h) in enumerate(hs)
+        e_true = compute_energy(P, IP, S, matrices, X + h*dir)
+        e_approx = e + IP.Δs*LA.dot(r, h*dir)
+
+        errors[i] = LA.norm(e_true - e_approx)
+    end
+
+    (a, b) = linreg(log10.(hs), log10.(errors))
+
+    if a > 1.5
+        @info "Slope is above 1.5, looks OK!"
+    elseif a > 1.1
+        @warn "Slope is below 1.5 but above 1.1, strange."
+    else
+        @error "Slope is 1 or below, something's wrong!"
+    end
+
+    fig = GLMakie.Figure()
+    ax1 = GLMakie.Axis(fig[1,1], xlabel="step size", ylabel="error", xscale=GLMakie.log10, yscale=GLMakie.log10)
+
+    GLMakie.scatterlines!(ax1, hs, errors, color="blue")
+    GLMakie.scatterlines!(ax1, hs, 10.0^b*hs.^a, color="red")
+
+    GLMakie.display(fig)
+end
+
 function check_differential(P::Params, S::Stiffness, X::Vector{Float64})
     IP = compute_intermediate(P, S)
     matrices = assemble_fd_matrices(P, IP; winding_number=compute_winding_number(P, X))
