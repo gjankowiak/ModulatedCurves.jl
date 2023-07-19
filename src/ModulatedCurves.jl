@@ -1060,6 +1060,8 @@ function initial_data_parametric(P::Params, p::Function, rho_function::Union{Fun
         if !haskey(p_params, :padding)
             @error "Cannot patch orgin without padding parameter"
         else
+            padding = p_params[:padding]
+
             patch_quarter_length = 10
             patch_half_length = 2patch_quarter_length
 
@@ -1067,18 +1069,25 @@ function initial_data_parametric(P::Params, p::Function, rho_function::Union{Fun
             x_out = xy_even[patch_half_length+1, 1]
             y_out = xy_even[patch_half_length+1, 2]
 
-            c = y_out/x_out^4 # c < 0
+            c = (y_out + padding)/x_out^4 # c < 0
+            # c = y_out/x_out^4 # c < 0
 
             @show x_out, y_out, c
 
-            coeff = max.(abs.(-patch_half_length:patch_half_length) .- patch_quarter_length, 0.0)
+            coeff = max.(abs.(-patch_half_length:patch_half_length) .- patch_quarter_length, 0.0).^2
             coeff ./= maximum(coeff)
 
             coeff_start = coeff[2 + patch_half_length:end]
             coeff_end = coeff[1:patch_half_length]
 
-            xy_even[2:1+patch_half_length,2] .= (1 .- coeff_start).*c.*xy_even[2:1+patch_half_length,1].^4 .+ coeff_start.*xy_even[2:1+patch_half_length,2]
-            xy_even[end-patch_half_length:end-1,2] .= (1 .- coeff_end).*c.*xy_even[end-patch_half_length:end-1,1].^4 .+ coeff_end.*xy_even[end-patch_half_length:end-1,2]
+            # xy_even[2:1+patch_half_length,2] .= (1 .- coeff_start).*(-padding .+ c.*xy_even[2:1+patch_half_length,1].^4) .+ coeff_start.*xy_even[2:1+patch_half_length,2]
+            # xy_even[end-patch_half_length:end-1,2] .= (1 .- coeff_end).*(-padding .+ c.*xy_even[end-patch_half_length:end-1,1].^4) .+ coeff_end.*xy_even[end-patch_half_length:end-1,2]
+            #
+            xy_even[1,2] = -padding
+            xy_even[end,2] = -padding + c*xy_even[end,1].^4
+
+            xy_even[2:1+patch_half_length,2] .= (1 .- coeff_start).*(-padding .+ c.*xy_even[2:1+patch_half_length,1].^4) .+ coeff_start.*xy_even[2:1+patch_half_length,2]
+            xy_even[end-patch_half_length:end-1,2] .= (1 .- coeff_end).*(-padding .+ c.*xy_even[end-patch_half_length:end-1,1].^4) .+ coeff_end.*xy_even[end-patch_half_length:end-1,2]
 
             xy_even[N_half-patch_half_length:N_half+patch_half_length,2] .= (1 .- coeff).*(xy_even[N_half,2] .- c*xy_even[N_half-patch_half_length:N_half+patch_half_length,1].^4) .+ coeff.*xy_even[N_half-patch_half_length:N_half+patch_half_length,2]
         end

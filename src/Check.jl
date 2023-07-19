@@ -1,4 +1,4 @@
-import GLMakie
+# import GLMakie
 
 function check_energy_gradient(P::Params, S::Stiffness, X::Vector{Float64})
     IP = compute_intermediate(P, S)
