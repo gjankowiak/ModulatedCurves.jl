@@ -3,7 +3,7 @@ module ModulatedCurves
 import Printf: @sprintf, @printf
 
 export Params, Stiffness, IntermediateParams, SolverParams
-export compute_intermediate, build_flower, assemble_fd_matrices, init_plot, do_flow, check_differential
+export compute_intermediate, build_flower, assemble_fd_matrices, init_plot, do_flow
 export M
 export params_from_toml, _compute_intermediate
 
@@ -36,6 +36,11 @@ include("./Types.jl")
 include("./Plotting.jl")
 include("./Check.jl")
 
+"""
+    copy_struct(s)
+
+Return a copy of the structure `s`.
+"""
 function copy_struct(s)
   T = typeof(s)
   fields = fieldnames(T)
@@ -52,6 +57,11 @@ function _compute_intermediate(P::Params)
   )
 end
 
+"""
+    compute_intermediate(P::Params, S::Stiffness)
+
+Compute the intermediates parameters (e.g. Δs) and return a IntermediateParams.
+"""
 function compute_intermediate(P::Params, S::Stiffness)
   Δs = P.L / P.N
   rho_eq = P.M / P.L
@@ -79,6 +89,13 @@ function prompt_yes_no(s::String, default_yes::Bool=false)
   end
 end
 
+"""
+    X2candidate(P::Params, X; copy::Bool=false)
+
+Return a Candidate (see Types.jl) corresponding to the vector X.
+
+If copy is true, the underlying data for ρ and θ is copied. Otherwise views are used.
+"""
 function X2candidate(P::Params, X; copy::Bool=false)
   if copy
     return Candidate(X[1:P.N],
@@ -97,6 +114,11 @@ function X2candidate(P::Params, X; copy::Bool=false)
   end
 end
 
+"""
+    candidate2X(P::Params, c::Candidate)
+
+Return a Vector{Float64} from a Candidate struct.
+"""
 function candidate2X(P::Params, c::Candidate)
   return [c.ρ; c.θ; c.λx; c.λy; c.λM]
 end
@@ -113,6 +135,11 @@ function prepare_fft_plans(n::Int)
   return (p=p, ip=ip, freqs=freqs)
 end
 
+"""
+    get_first_frequency(u, plans, symb)
+
+Return the index (in `plans.freqs`) and value of the first non-zero non-constant frequency the FFT of the signal `u`.
+"""
 function get_first_frequency(u, plans, symb)
   c = abs.(plans.p * u)
   # we skip the first frequency for θ which is always non zero
@@ -124,6 +151,11 @@ function get_first_frequency(u, plans, symb)
   return idx, plans.freqs[idx]
 end
 
+"""
+    build_highpass_mask(u, plans, symb)
+
+Return a frequency mask corresponding to `u`
+"""
 function build_highpass_mask(u, plans, symb)
   idx, freq0 = get_first_frequency(u, plans, symb)
   return [i >= idx for i in 1:(length(u)÷2+1)]
@@ -133,167 +165,19 @@ function apply_fft_mask(u, mask, plans)
   return plans.ip * (mask .* (plans.p * u))
 end
 
-"""
-    Structure of X:
-    * ρ = X[1:P.N]
-    * θ = X[P.N+1, 2*P.N]
-    * λx = X[2*P.N+1]
-    * λy = X[2*P.N+2]
-    * λM = X[2*P.N+3]
-"""
-
-function adapt_step(P::Params, IP::IntermediateParams, S::Stiffness,
-  SP::SolverParams, matrices::FDMatrices,
-  X::Vector{Float64}, δX::Vector{Float64}, current_residual::Vector{Float64},
-  current_time_step::Float64, history::History)
-
-  local energy, residual
-
-  Xnew = zeros(size(X))
-  t = current_time_step
-
-  check_step_up = false
-  prev_t = -1
-
-  residual_inc_ratio = Inf
-
-  while true
-    #
-    # Update
-    Xnew .= X + t * δX
-    cnew = X2candidate(P, Xnew)
-
-    # Check that rho is within admissible bounds
-    # IF not, reduce step size
-    if ((P.potential_range > 0) &&
-        ((P.ρ_max >= 0 && (maximum(cnew.ρ) > P.ρ_max)) ||
-         (P.ρ_max < 0 && (minimum(cnew.ρ) < P.ρ_max))))
-      t /= 2
-      print("Rho above bound, reducing relaxation parameter to: ")
-      println(t)
-      if t < SP.min_step_size
-        error("Relaxation parameter became too small")
-      end
-      continue
-    end
-
-    # Compute residual and energy
-    residual = compute_residual(P, IP, S, matrices, Xnew)
-    energy = compute_energy(P, IP, S, matrices, Xnew)
-
-    residual_inc_ratio = LA.norm(residual - history.residual_prev) / LA.norm(residual)
-
-    if ((energy > history.energy_prev * (1 + 2e-1)) ||
-        (residual_inc_ratio > SP.step_down_threshold))
-      if (energy > history.energy_prev * (1 + 2e-1))
-        reason = "energy going up"
-      else
-        reason = "residual ratio above threshold"
-      end
-      if check_step_up
-        t = prev_t
-      else
-        t /= SP.step_factor^2
-        print("Reducing relaxation parameter to: ")
-        print(t)
-        println(", reason: ", reason)
-        if t < SP.min_step_size
-          error("Relaxation parameter became too small")
-        end
-      end
-    else
-      if check_step_up
-        print("Increasing relaxation parameter to: ")
-        println(t)
-        @goto finish
-      end
-      if ((history.energy_prev > energy) &&
-          # (LA.norm(residual) > 1e-3) &&
-          (residual_inc_ratio < SP.step_up_threshold) &&
-          (t < SP.max_step_size))
-        prev_t = t
-        t = min(SP.step_factor * t, SP.max_step_size)
-        check_step_up = true
-      else
-        @goto finish
-      end
-    end
-  end
-
-  @label finish
-  history.energy_prev = energy
-  history.residual_prev = current_residual
-
-  @debug @sprintf "Residual inc ratio: %.5f, δt: %.5f\n" residual_inc_ratio t
-
-  return Xnew, residual, t
-end
-
 function compute_winding_number(P::Params, X::Vector{Float64})
   c = X2candidate(P, X)
   return round(Int, (c.θ[end] - c.θ[1]) / 2π)
 end
 
-function minimizor(P::Params, IP::IntermediateParams, S::Stiffness,
-  Xinit::Vector{Float64}, SP::SolverParams=SolverParams())
-  matrices = assemble_fd_matrices(P, IP; winding_number=compute_winding_number(P, Xinit))
+"""
+    build_flower(P::Params, IP::IntermediateParams, S::Stiffness,
+  Xinit::Vector{Float64}, SP::SolverParams=SolverParams(); include_multipliers::Bool=false,
+  energy_circle::Float64=0.0, dump_system::Bool=false, dump_dir::String=".",
+  highpass::Bool=false)
 
-  # Initialization
-  history = History(0, zeros(2 * P.N + 3))
-
-  X = Base.copy(Xinit)
-  n = 1
-  step_size = SP.step_size
-
-  residual = compute_residual(P, IP, S, matrices, X)
-
-  energy_i = zeros(SP.max_iter)
-
-  energy_ρ_i = zeros(SP.max_iter)
-  energy_θ_i = zeros(SP.max_iter)
-
-  residual_norm_i = zeros(SP.max_iter)
-
-  history.energy_prev = energy_i[1]
-  history.residual_prev .= residual
-
-  # Loop until tolerance or max. iterations is met
-  function ()
-    n += 1
-    # Assemble
-    A = assemble_inner_system(P, IP, S, matrices, X)
-
-    # Solve
-    δX = A \ -residual
-
-    if SP.adapt
-      Xnew, residual, time_step = adapt_step(P, IP, S, SP, matrices,
-        X, δX,
-        residual, step_size,
-        history)
-      X .= Xnew
-    else
-      # Update
-      X += time_step * δX
-      residual = compute_residual(P, IP, S, matrices, X)
-    end
-
-    # Compute residual norm and energy
-    residual_norm = LA.norm(residual)
-    energy_ρ_i[n], energy_θ_i[n] = compute_energy_split(P, IP, S, matrices, X)
-    energy_i[n] = energy_ρ_i[n] + energy_θ_i[n]
-    residual_norm_i[n] = residual_norm
-
-    converged = (LA.norm(residual - history.residual_prev) < SP.rtol) || (LA.norm(residual) < SP.atol)
-
-    history.energy_prev = energy_i[n]
-    history.residual_prev = residual
-
-    res = Result(X, n, energy_i, energy_ρ_i, energy_θ_i, residual_norm_i, converged, converged || (n >= SP.max_iter))
-    return res
-  end
-end
-
+Initialiaze the solver and return a function which returns the iterates of the time-depended problem defined by the parameters.
+"""
 function build_flower(P::Params, IP::IntermediateParams, S::Stiffness,
   Xinit::Vector{Float64}, SP::SolverParams=SolverParams(); include_multipliers::Bool=false,
   energy_circle::Float64=0.0, dump_system::Bool=false, dump_dir::String=".",
@@ -301,50 +185,82 @@ function build_flower(P::Params, IP::IntermediateParams, S::Stiffness,
 
   winding_number = compute_winding_number(P, Xinit)
 
+  # define the finite difference matrices needed for the space discretization
   matrices = assemble_fd_matrices(P, IP; winding_number=winding_number)
 
+  # discretization of the interval [0, L]
   s = collect(range(0, P.L, length=P.N + 1))[1:P.N]
 
-  # Initialization
+  # Initialization of the history (previous energy and residual)
   history = History(0, zeros(2 * P.N + 3))
 
+  # X contains the current (time) iterate
+  # Structure of X:
+  # * ρ = X[1:P.N]
+  # * θ = X[P.N+1, 2*P.N]
+  # * λx = X[2*P.N+1]
+  # * λy = X[2*P.N+2]
+  # * λM = X[2*P.N+3]
   X = Base.copy(Xinit)
-  Xj_prev = Base.copy(Xinit)
-  Xj = Base.copy(Xinit)
 
+  # View of the iterate as a Candidate
+  c = X2candidate(P, X)
+
+  ######################################
+  ## Storage for the Newton iteration ##
+  ######################################
+
+  # Storage for the current and previous (Newton) iterates
+  Xj = Base.copy(Xinit)
+  Xj_prev = Base.copy(Xinit)
+
+  # Storage for the solution of the linear system in the Newton's iteration
   δX = Base.copy(Xinit)
 
-  mm_term = zeros(size(X))
-
+  # Storage for the minimizing movement term in the Newton iteration
   X_up = view(X, 1:2P.N)
   Xj_up = view(Xj, 1:2P.N)
+  mm_term = zeros(size(X))
   mm_term_up = view(mm_term, 1:2P.N)
 
-  c = X2candidate(P, X)
-  n = 1
-
-  time_step_size = SP.step_size
-  newton_step_size = SP.newton_step_size
-
+  # Residual
   residual = compute_residual(P, IP, S, matrices, X)
   residual_prev = Base.copy(residual)
 
   residual_norm = 1.0
 
+  # Iteration number
+  n = 1
+
+  # Initialize step sizes
+  time_step_size = SP.step_size
+  newton_step_size = SP.newton_step_size
+
   eρ, eθ = compute_energy_split(P, IP, S, matrices, X)
+
+  # Storage for energy at each iteration
   energy_i = zeros(1 + SP.max_iter)
   energy_ρ_i = zeros(1 + SP.max_iter)
   energy_θ_i = zeros(1 + SP.max_iter)
 
   energy_i[1], energy_ρ_i[1], energy_θ_i[1] = eρ + eθ, eρ, eθ
 
+  # Storage for the residual
   residual_norm_i = [LA.norm(residual)]
+
+  # Storage for ∫ θ
   int_θ_i = [sum(c.θ) * IP.Δs]
+
+  # Storage for the time
   t_i = zeros(1 + SP.max_iter)
 
   history.energy_prev = energy_i[1]
   history.residual_prev .= residual
 
+  # Identity matrix for the Newton system
+  # If include_multipliers is false, the entries corresponding
+  # to the Lagrange multipliers for the mass and closedness constraints
+  # are set to zero (they are not 'flowed').
   id_matrix = Matrix{Float64}(LA.I, 2P.N + 3, 2P.N + 3)
   if !include_multipliers
     for i in (2P.N:2P.N+3)
@@ -354,6 +270,7 @@ function build_flower(P::Params, IP::IntermediateParams, S::Stiffness,
 
   rho_extrema = extrema(c.ρ)
 
+  # Prepare the frequency mask when stabilizing the k-fold symmetric solutions
   if highpass
     fft_plans = prepare_fft_plans(P.N)
     θ_flat = c.θ - 2π * winding_number * s / P.L
@@ -362,14 +279,15 @@ function build_flower(P::Params, IP::IntermediateParams, S::Stiffness,
     fft_mask = fft_mask_θ .|| fft_mask_ρ
   end
 
-
   # Loop until tolerance or max. iterations is met
   function _f()
 
     Xj_prev .= X
     Xj .= X
 
+    # Reset the counter of Newton iterations
     n_newton = 0
+
     iter_stationary_res = 0
 
     newton_failed = false
@@ -380,14 +298,16 @@ function build_flower(P::Params, IP::IntermediateParams, S::Stiffness,
       #   Newton loop   #
       ###################
 
+      # Step the counter of Newton iterations
       n_newton += 1
+
       residual .= compute_residual(P, IP, S, matrices, Xj)
 
-      # Assemble
+      # Assemble the Newton matrix
       A = assemble_inner_system(P, IP, S, matrices, Xj)
       A_max = maximum(abs.(A))
 
-      # Solve
+      # Minimizing movement term
       @. mm_term_up = X_up - Xj_up
 
       if dump_system
@@ -399,17 +319,23 @@ function build_flower(P::Params, IP::IntermediateParams, S::Stiffness,
         end
       end
 
+      # Newton solve
       δX .= (id_matrix .+ time_step_size * A) \ (-time_step_size * residual + mm_term)
 
+      # Stabilization of the k-fold symmetric solutions
       if highpass
         δX[1:P.N] = apply_fft_mask(view(δX, 1:P.N), fft_mask, fft_plans)
         δX[P.N+1:2P.N] = apply_fft_mask(view(δX, P.N+1:2P.N), fft_mask, fft_plans)
       end
 
+      # Save previous Newton iterate
       Xj_prev .= Xj
 
+      # (relaxed) Newton iteration
       @. Xj += newton_step_size * δX
-      residual .= compute_residual(P, IP, S, matrices, Xj, X, time_step_size) # the NEW residual
+
+      # Compute the new Newton residual
+      residual .= compute_residual(P, IP, S, matrices, Xj, X, time_step_size)
 
       # Compute residual norm and energy
       residual_norm = LA.norm(residual)
@@ -427,25 +353,38 @@ function build_flower(P::Params, IP::IntermediateParams, S::Stiffness,
       residual_prev .= residual
       @views step_norm = LA.norm(Xj[1:2P.N] - X[1:2P.N], Inf)
 
+      # Newton convergence criterion:
+      # · |Xj - Xj_prev| < rtol for more than 10 iterations
+      # · the residual_norm is below the absolute tolerance
       converged = (iter_stationary_res > 10) || (LA.norm(residual) / P.N < SP.atol)
 
       if converged
 
-        # adapt
+        # Here the *Newton* iteration has converged
+        # We need to check if the time step-size is acceptable.
+        # We do this crudely by comparing step_norm, ie |Xj - X|∞ with given thresholds.
+
         if SP.adapt
           if step_norm < SP.step_up_threshold && !newton_failed
+            # step_norm is smaller than step_up_threshold, we increase the step-size
+            # and accept the current iterate
             if time_step_size < SP.max_step_size
               time_step_size = min(SP.max_step_size, time_step_size * SP.step_factor)
               println()
               println(@sprintf("|X-Xprev| = %.5e, time step ↑ (%f)", step_norm, time_step_size))
             end
           elseif step_norm > SP.step_down_threshold
+            # step_norm is larger than step_down_threshold, we increase the step-size
+            # if it is at the minimum, throw
             if time_step_size == SP.min_step_size
               throw(TimeStepTooSmall())
             end
+
             time_step_size = max(SP.min_step_size, time_step_size / SP.step_factor)
             println()
             println(@sprintf("|X-Xprev| = %.5e, time step ↓ (%f)", step_norm, time_step_size))
+
+            # The step-size has been reduced, we reject the current iterate and restart the Newton iteration
             Xj_prev .= X
             Xj .= X
 
@@ -457,12 +396,12 @@ function build_flower(P::Params, IP::IntermediateParams, S::Stiffness,
 
         (intersect_i, intersect_j) = is_simple(P, IP, X)
 
-
         print(@sprintf("%s[%d/%d] t=%f, Eµ: %.5e/%.5e, |X-Xprev|: %.5e, %.2f ≤ ρ ≤ %.2f, (%d,%d)", "\b"^1000, n, n_newton, t_i[max(1, n - 1)] + time_step_size, eρ + eθ, eρ + eθ - energy_circle, step_norm, rho_extrema[1], rho_extrema[2], intersect_i, intersect_j))
         println()
         break
       end
 
+      # If the Newton iteration did not converge, reduce the time step-size (and restart the Newton iteration)
       if n_newton > SP.newton_max_iter
         if time_step_size == SP.min_step_size
           throw(TimeStepTooSmall())
@@ -481,25 +420,29 @@ function build_flower(P::Params, IP::IntermediateParams, S::Stiffness,
       end
     end
 
+    # At this point the Newton iteration has converged and the time step-size has been accepted
     step_norm = LA.norm(X - Xj, Inf)
     X .= Xj
 
     rho_extrema = (min(rho_extrema[1], minimum(c.ρ)),
       max(rho_extrema[2], maximum(c.ρ)))
 
+    # Step the iteration and time counters
     n += 1
+    t_i[n] = t_i[n-1] + time_step_size
 
+    # Compute and store the energy
     eρ, eθ = compute_energy_split(P, IP, S, matrices, X)
     energy = eρ + eθ
     energy_i[n] = energy
     energy_ρ_i[n] = eρ
     energy_θ_i[n] = eθ
 
-    t_i[n] = t_i[n-1] + time_step_size
-
+    # Compute and store the residual
     residual_norm = LA.norm(residual)
     push!(residual_norm_i, residual_norm)
 
+    # Compute and store ∫θ
     push!(int_θ_i, sum(c.θ) * IP.Δs)
 
     history.energy_prev = energy
@@ -507,6 +450,7 @@ function build_flower(P::Params, IP::IntermediateParams, S::Stiffness,
 
     res = Result(X, n, energy_i, energy_ρ_i, energy_θ_i, residual_norm_i, t_i, int_θ_i, step_norm < SP.abs_time_tol, n >= SP.max_iter || t_i[n] >= SP.max_time || step_norm < 1e-12)
 
+    # return the current iterate
     return res
   end
   return _f, matrices
@@ -552,7 +496,6 @@ function assemble_inner_system(P::Params, IP::IntermediateParams, S::Stiffness,
     (_, _, w_second) = compute_potential(P, X)
     A_E1_ρ .-= w_second .* Matrix{Float64}(LA.I, N, N)
   end
-  # FIXME should be minus sign
   A_E1_θ = -beta_prime_ρ .* (θ_prime_centered .- P.c0) .* matrices.D1c
 
   A_E1_λM = ones(N)
@@ -901,7 +844,6 @@ function do_flow(P::Params, S::Stiffness, Xinit::Vector{Float64}, solver_params:
       end
       sleep(0.01)
     else
-      # print(".")
     end
 
     step_norm = LA.norm(Xx - Xx_prev, Inf)
@@ -1045,7 +987,6 @@ function initial_data_parametric(P::Params, p::Function, rho_function::Union{Fun
   xy_length = sum(hypot.(view(xy_delta, :, 1), view(xy_delta, :, 2)))
 
   # resample to get evenly spaced nodes
-  # xy_even = EvenParam.reparam(xy; closed=true, new_N = N+1)[1:N,:]
   xy_even = EvenParam.reparam(xy; closed=true, new_N=N)
 
   # Recenter
@@ -1077,7 +1018,6 @@ function initial_data_parametric(P::Params, p::Function, rho_function::Union{Fun
       y_out = xy_even[patch_half_length+1, 2]
 
       c = (y_out + padding) / x_out^4 # c < 0
-      # c = y_out/x_out^4 # c < 0
 
       @show x_out, y_out, c
 
@@ -1087,9 +1027,6 @@ function initial_data_parametric(P::Params, p::Function, rho_function::Union{Fun
       coeff_start = coeff[2+patch_half_length:end]
       coeff_end = coeff[1:patch_half_length]
 
-      # xy_even[2:1+patch_half_length,2] .= (1 .- coeff_start).*(-padding .+ c.*xy_even[2:1+patch_half_length,1].^4) .+ coeff_start.*xy_even[2:1+patch_half_length,2]
-      # xy_even[end-patch_half_length:end-1,2] .= (1 .- coeff_end).*(-padding .+ c.*xy_even[end-patch_half_length:end-1,1].^4) .+ coeff_end.*xy_even[end-patch_half_length:end-1,2]
-      #
       xy_even[1, 2] = -padding
       xy_even[end, 2] = -padding + c * xy_even[end, 1] .^ 4
 
