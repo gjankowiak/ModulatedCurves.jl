@@ -344,7 +344,6 @@ function build_flower(P::Params, IP::IntermediateParams, S::Stiffness,
       residual_relative = LA.norm(residual - residual_prev) / residual_norm
 
       if residual_relative < SP.rtol
-        @show LA.norm(residual - residual_prev)
         iter_stationary_res += 1
       else
         iter_stationary_res = 0
@@ -851,8 +850,7 @@ function do_flow(P::Params, S::Stiffness, Xinit::Vector{Float64}, solver_params:
 
     if res.finished || res.residual_norm_i[n] > 1e10 || (step_norm < solver_params.abs_time_tol)
       println()
-      print("Finished, converged: ")
-      println(res.converged)
+      print("Finished.")
       if do_plot
         update_plot(res.sol, (@sprintf "t=%f, %d, energy/rel: %.4f/%.4f" res.t_i[n] n res.energy_i[n] (res.energy_i[n] - energy_circle)), res)
         if record_movie
@@ -945,8 +943,6 @@ function initial_data_smooth(P::Params; sides::Int=1, smoothing::Float64, revers
     thetas = repeat(thetas_1p, sides) + repeat(2π / sides * (0:sides-1), inner=k)
   end
 
-  @show rho_phase
-
   rhos = [cos.(2π * φ * rwn / P.L + rho_phase) for φ in range(0, 2π, P.N + 1)[1:P.N]]
   extrema_rho = extrema(rhos)
   p2p_rho = extrema_rho[2] - extrema_rho[1]
@@ -1001,9 +997,6 @@ function initial_data_parametric(P::Params, p::Function, rho_function::Union{Fun
   xy_even_delta = xy_even .- circshift(xy_even, 1)
   xy_even_length_post = sum(hypot.(view(xy_even_delta, :, 1), view(xy_even_delta, :, 2)))
 
-  @show xy_even_length_pre
-  @show xy_even_length_post
-
   if get(p_params, :patch_x4_origin, false)
     if !haskey(p_params, :padding)
       @error "Cannot patch orgin without padding parameter"
@@ -1018,8 +1011,6 @@ function initial_data_parametric(P::Params, p::Function, rho_function::Union{Fun
       y_out = xy_even[patch_half_length+1, 2]
 
       c = (y_out + padding) / x_out^4 # c < 0
-
-      @show x_out, y_out, c
 
       coeff = max.(abs.(-patch_half_length:patch_half_length) .- patch_quarter_length, 0.0) .^ 2
       coeff ./= maximum(coeff)
@@ -1074,8 +1065,6 @@ function initial_data_parametric(P::Params, p::Function, rho_function::Union{Fun
       rhos ./= (P.L / P.N * sum(rhos)) / P.M
     end
 
-    @show (P.L / P.N * sum(rhos))
-
     rhos_extrema = extrema(rhos)
 
     println("$(rhos_extrema[1]) ≤ ρ0 ≤ $(rhos_extrema[2])")
@@ -1110,9 +1099,6 @@ function initial_data_polar(P::Params, r::Function, r_params::NamedTuple)
   # Recenter
   xy_even = xy_even .- [xy_even[1, 1] xy_even[1, 2]]
 
-  @show xy_even[1, :]
-  @show xy_even[end, :]
-
   # Rotate so that the first segment is parallel to the x axis
   xy_even_c = xy_even[:, 1] + xy_even[:, 2] * im
   alpha = angle(xy_even_c[2])
@@ -1146,9 +1132,7 @@ function initial_data_polar(P::Params, r::Function, r_params::NamedTuple)
 end
 
 function initial_data_from_file(P::Params, filename::String, config_dir::String)
-  @show filename
   data = readdlm(joinpath(config_dir, filename), ',')
-  @show size(data)
   if size(data, 2) > 1
     xy = data[:, 1:2]
     xy_even = EvenParam.reparam(xy; closed=true, new_N=P.N)
@@ -1181,15 +1165,10 @@ function initial_data_from_file(P::Params, filename::String, config_dir::String)
       rhos = P.M / P.N * ones(P.N)
     end
 
-    @show size(rhos)
-    @show size(thetas)
-
     return [rhos; thetas; 0; 0; 0]
   else
-    @show P.N
     rhos = data[1:P.N]
     thetas = data[P.N+1:2P.N]
-    @show rhos, thetas
     return [rhos; thetas; 0; 0; 0]
   end
 end

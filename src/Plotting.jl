@@ -1,8 +1,8 @@
-import GLMakie
-M = GLMakie
-#import CairoMakie
-#M = CairoMakie
+#import GLMakie
+#M = GLMakie
 
+import CairoMakie
+M = CairoMakie
 M.activate!()
 
 import Elliptic
@@ -24,8 +24,6 @@ function compute_figure_8(n::Int64, length::Real, int_θ::Float64=0.0)
   # Compute tangential angles
   xy_diff = circshift(xy, -1) - xy
   xy_angles = angle.(xy_diff[:, 1] + xy_diff[:, 2] * im)
-
-  @show xy_angles[1]
 
   thetas = zeros(n)
   thetas[1] = xy_angles[1]
@@ -49,8 +47,6 @@ function compute_figure_8(n::Int64, length::Real, int_θ::Float64=0.0)
   xy_diff = circshift(xy, -1) - xy
   xy_angles = angle.(xy_diff[:, 1] + xy_diff[:, 2] * im)
 
-  @show xy_angles[1]
-
   thetas[1] = xy_angles[1]
   for i in 2:n
     thetas[i] = thetas[i-1] + rem(xy_angles[i] - thetas[i-1], Float64(π), RoundNearest)
@@ -59,8 +55,6 @@ function compute_figure_8(n::Int64, length::Real, int_θ::Float64=0.0)
   int_thetas = length / n * sum(thetas)
   @show int_thetas
 
-  # XY_delta = XY .- circshift(XY, 1)
-  # Fo8_length = sum(hypot.(view(XY_delta, :, 1), view(XY_delta, :, 2)))
   return xy
 end
 
