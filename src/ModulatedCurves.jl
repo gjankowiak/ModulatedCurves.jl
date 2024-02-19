@@ -26,12 +26,9 @@ import Symbolics
 
 import DelimitedFiles: readdlm
 
-import JankoUtils: spdiagm_const, compute_ls_intersect
-
-import EvenParam
-
 const SubA = SubArray{Float64,1,Array{Float64,1}}
 
+include("./Utils.jl")
 include("./Types.jl")
 include("./Plotting.jl")
 include("./Check.jl")
@@ -983,7 +980,7 @@ function initial_data_parametric(P::Params, p::Function, rho_function::Union{Fun
   xy_length = sum(hypot.(view(xy_delta, :, 1), view(xy_delta, :, 2)))
 
   # resample to get evenly spaced nodes
-  xy_even = EvenParam.reparam(xy; closed=true, new_N=N)
+  xy_even = reparam(xy; closed=true, new_N=N)
 
   # Recenter
   xy_even = xy_even .- [xy_even[1, 1] xy_even[1, 2]]
@@ -1093,8 +1090,8 @@ function initial_data_polar(P::Params, r::Function, r_params::NamedTuple)
   xy = [x y]
 
   # resample to get evenly spaced nodes
-  # xy_even = EvenParam.reparam(xy; closed=true, new_N = N+1)[1:N,:]
-  xy_even = EvenParam.reparam(xy; closed=true, new_N=N)
+  # xy_even = reparam(xy; closed=true, new_N = N+1)[1:N,:]
+  xy_even = reparam(xy; closed=true, new_N=N)
 
   # Recenter
   xy_even = xy_even .- [xy_even[1, 1] xy_even[1, 2]]
@@ -1135,7 +1132,7 @@ function initial_data_from_file(P::Params, filename::String, config_dir::String)
   data = readdlm(joinpath(config_dir, filename), ',')
   if size(data, 2) > 1
     xy = data[:, 1:2]
-    xy_even = EvenParam.reparam(xy; closed=true, new_N=P.N)
+    xy_even = reparam(xy; closed=true, new_N=P.N)
     #
     # Rotate so that the first segment is parallel to the x axis
     xy_even_c = xy_even[:, 1] + xy_even[:, 2] * im
@@ -1346,8 +1343,8 @@ function resample(X::Vector{Float64}, new_N::Int64)
 
   s = range(0, 2π; length=old_N + 1)[1:old_N]
 
-  new_ρ = EvenParam.resample(old_ρ, s, new_N; periodicise=true)
-  new_θ = EvenParam.resample(old_θ, s, new_N; append=[round(old_θ[end] / π) * π])
+  new_ρ = resample(old_ρ, s, new_N; periodicise=true)
+  new_θ = resample(old_θ, s, new_N; append=[round(old_θ[end] / π) * π])
 
   m = vcat(new_ρ, new_θ, X[2old_N+1:end])
   return m
