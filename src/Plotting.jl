@@ -260,15 +260,15 @@ function init_plot(P::Params, IP::IntermediateParams, S::Stiffness, X::Vector{Fl
     if w == 0
       @show P.L
       xy_fo8 = compute_figure_8(P.N, P.L, int_θ_0)
-      M.lines!(axes[1, 1], xy_fo8[:, 1], xy_fo8[:, 2], lw=0.5, color="gray")
+      M.lines!(axes[1, 1], xy_fo8[:, 1], xy_fo8[:, 2], linewidth=0.5, color="gray")
     else
-      M.lines!(axes[1, 1], cos.(t), sin.(t), lw=0.5, color="gray")
+      M.lines!(axes[1, 1], cos.(t), sin.(t), linewidth=0.5, color="gray")
     end
   end
 
   if box_hlines
-    M.hlines!(axes[1, 1], M.lift(x -> x[1], xy_minmax), lw=0.5, color="gray")
-    M.hlines!(axes[1, 1], M.lift(x -> x[2], xy_minmax), lw=0.5, color="gray")
+    M.hlines!(axes[1, 1], M.lift(x -> x[1], xy_minmax), linewidth=0.5, color="gray")
+    M.hlines!(axes[1, 1], M.lift(x -> x[2], xy_minmax), linewidth=0.5, color="gray")
   end
 
   if monochrome
